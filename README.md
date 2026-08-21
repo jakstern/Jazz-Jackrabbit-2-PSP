@@ -18,7 +18,7 @@ other assets from the game.
 
 ## Preview
 
-https://github.com/user-attachments/assets/16baab0f-a6e1-4405-a8cf-6229b5cc2f09
+https://github.com/user-attachments/assets/b550d463-e7d0-42eb-9d1e-6caed82427dc
 
 ## Running the game
 
