@@ -18,19 +18,7 @@ other assets from the game.
 
 ## Preview
 
-Gameplay video to be added.
-
-<!--
-  To embed the video so it plays inline on this page:
-    1. Open a new GitHub issue (or edit this file in GitHub's web editor) and
-       drag the .mp4 into the text box. GitHub uploads it and gives you a
-       https://github.com/user-attachments/assets/... URL.
-    2. Replace the line above with the block below, using that URL.
-  A <video> tag pointing at a file committed in this repository will not play
-  on the landing page. Only user-attachment URLs do.
-
-  <video src="https://github.com/user-attachments/assets/PASTE-ID-HERE" controls muted loop></video>
--->
+https://github.com/user-attachments/assets/16baab0f-a6e1-4405-a8cf-6229b5cc2f09
 
 ## Running the game
 
