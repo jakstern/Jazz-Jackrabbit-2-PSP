@@ -1,0 +1,143 @@
+#pragma once
+
+#include "../PlayerAction.h"
+#include "../../nCine/Base/BitArray.h"
+#include "../../nCine/Input/InputEvents.h"
+#include "../../nCine/Primitives/Vector2.h"
+
+#include <Containers/ArrayView.h>
+#include <Containers/SmallVector.h>
+
+using namespace Death::Containers;
+using namespace nCine;
+
+namespace Jazz2::UI::Menu
+{
+	class RemapControlsSection;
+}
+
+namespace Jazz2::Input
+{
+	/**
+		@brief Navigation flags for @ref ControlScheme::FetchNavigation()
+		
+		Restricts which input sources are considered when resolving menu navigation, allowing keyboard
+		presses, gamepad presses or both to be taken into account. Supports a bitwise combination of its
+		member values.
+	*/
+	enum class NavigationFlags
+	{
+		/** @brief None */
+		None = 0,
+		/** @brief Allow only keyboard key presses */
+		AllowKeyboard = 0x01,
+		/** @brief Allow only gamepad button presses */
+		AllowGamepads = 0x02,
+		/** @brief Allow both keyboard and gamepad presses */
+		AllowAll = AllowKeyboard | AllowGamepads
+	};
+
+	DEATH_ENUM_FLAGS(NavigationFlags);
+
+	/**
+		@brief Control mapping target
+		
+		Describes a single bindable input source as opaque packed data, encoding either a keyboard key
+		or a gamepad button or axis (including the gamepad index and axis direction). Targets are created
+		through @ref ControlScheme::CreateTarget() and compared by their raw value.
+	*/
+	struct MappingTarget
+	{
+		/** @brief Opaque data of the target */
+		std::uint32_t Data;
+	};
+
+	/**
+		@brief Control mapping for a particular action
+		
+		Collects all input targets currently bound to a single player action, so that any one of them can
+		trigger it. The control scheme holds one such mapping per player and action.
+	*/
+	struct ControlSchemeMapping
+	{
+		/** @brief List of mapping targets */
+		SmallVector<MappingTarget, 3> Targets;
+	};
+
+	/**
+		@brief Result returned by @ref ControlScheme::FetchProcessedInput()
+		
+		Holds the resolved input state of a single local player for the current frame, combining the set
+		of pressed actions as a bit mask with a normalized analog movement vector.
+	*/
+	struct ProcessedInput
+	{
+		/** @brief Pressed actions */
+		std::uint64_t PressedActions;
+		/** @brief Movement vector */
+		Vector2f Movement;
+	};
+
+	/**
+		@brief Provides access to a user configured control scheme
+		
+		Holds the global keyboard and gamepad bindings for all local players and translates raw key and
+		gamepad state into processed per-player input and menu navigation. Bindings can be reset to
+		defaults and individual mapping targets created for keys, buttons and axes.
+	*/
+	class ControlScheme
+	{
+		friend class UI::Menu::RemapControlsSection;
+
+	public:
+		ControlScheme() = delete;
+		~ControlScheme() = delete;
+
+		/** @{ @name Constants */
+
+		/** @brief Maximum number of supported local players */
+		static constexpr std::int32_t MaxSupportedPlayers = 4;
+		/** @brief Maximum number of supported connected gamepads */
+#if defined(DEATH_TARGET_EMSCRIPTEN) || defined(DEATH_TARGET_SWITCH) || defined(DEATH_TARGET_WINDOWS_RT)
+		static constexpr std::int32_t MaxConnectedGamepads = 4;
+#else
+		static constexpr std::int32_t MaxConnectedGamepads = 6;
+#endif
+
+		/** @} */
+
+		/** @brief Resets all bindings to default */
+		static void Reset();
+
+		/** @brief Fetches processed standard input for specified player according to the current bindings */
+		static ProcessedInput FetchProcessedInput(std::int32_t playerIndex, const BitArray& pressedKeys, const ArrayView<const JoyMappedState*> joyStates, std::uint64_t prevPressedActions, bool analogAsButtons = true);
+		/** @brief Fetches navigation input according to the current bindings */
+		static std::uint32_t FetchNavigation(const BitArray& pressedKeys, const ArrayView<const JoyMappedState*> joyStates, NavigationFlags flags = NavigationFlags::AllowAll);
+
+		/** @brief Returns the entire mapping configuration */
+		static ArrayView<ControlSchemeMapping> GetAllMappings();
+		/** @brief Returns a mapping configuration for a given player index */
+		static ArrayView<ControlSchemeMapping> GetMappings(std::int32_t playerIdx);
+		/** @brief Returns a gamepad index for a given player index */
+		static std::int32_t GetGamepadForPlayer(std::int32_t playerIdx);
+		/** @brief Returns `true` if the action of any player is bound the specified target */
+		static bool ContainsTarget(PlayerAction action, MappingTarget target);
+
+		/** @brief Creates mapping target for a given key */
+		static MappingTarget CreateTarget(Keys key);
+		/** @brief Creates mapping target for a given gamepad button */
+		static MappingTarget CreateTarget(std::uint32_t gamepadIndex, ButtonName button);
+		/** @brief Creates mapping target for a given gamepad axis */
+		static MappingTarget CreateTarget(std::uint32_t gamepadIndex, AxisName axis, bool negative = false);
+
+	private:
+		static constexpr std::uint32_t GamepadMask = 0x80000000u;
+		static constexpr std::uint32_t GamepadAnalogMask = 0x40000000u;
+		static constexpr std::uint32_t GamepadNegativeMask = 0x20000000u;
+		static constexpr std::uint32_t GamepadIndexMask = 0x0FFF0000u;
+		static constexpr std::uint32_t ButtonMask = 0x0000FFFFu;
+		static constexpr float GamepadDeadZone = 0.1f;
+
+		static ControlSchemeMapping _mappings[MaxSupportedPlayers * (std::int32_t)PlayerAction::Count];
+	};
+}

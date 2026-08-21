@@ -1,0 +1,515 @@
+﻿#pragma once
+
+#include "ITileMapOwner.h"
+#include "../ILevelHandler.h"
+#include "../PitType.h"
+#include "../SuspendType.h"
+#include "TileSet.h"
+#include "LayerTypes.h"
+
+#include "../../nCine/Graphics/Camera.h"
+#include "../../nCine/Graphics/Viewport.h"
+
+#include <IO/Stream.h>
+
+using namespace Death::IO;
+
+namespace Jazz2
+{
+	class LevelHandler;
+
+}
+
+namespace Jazz2::Tiles
+{
+	/**
+		@brief Describes the configuration of a tile map layer
+		
+		Holds the parallax and rendering properties of a single layer --- its depth, per-axis scroll and auto-scroll
+		speeds, scroll offsets, repeat flags, speed models and the renderer type with its color parameter. One is
+		stored in each @ref TileMapLayer and drives how that layer is positioned and drawn relative to the camera.
+	*/
+	struct LayerDescription {
+		/** @brief Layer depth (Z position) */
+		std::uint16_t Depth;
+		/** @brief Horizontal speed */
+		float SpeedX;
+		/** @brief Vertical speed */
+		float SpeedY;
+		/** @brief Horizontal auto speed */
+		float AutoSpeedX;
+		/** @brief Vertical auto speed */
+		float AutoSpeedY;
+		/** @brief Horizontal scroll offset */
+		float OffsetX;
+		/** @brief Vertical scroll offset */
+		float OffsetY;
+		/** @brief Whether layer should repeat horizontally */
+		bool RepeatX;
+		/** @brief Whether layer should repeat vertically */
+		bool RepeatY;
+		/** @brief Whether inherent offset should be used */
+		bool UseInherentOffset;
+		/** @brief Horizontal speed model */
+		LayerSpeedModel SpeedModelX;
+		/** @brief Vertical speed model */
+		LayerSpeedModel SpeedModelY;
+
+		/** @brief Layer renderer type */
+		LayerRendererType RendererType;
+		/** @brief Layer color parameter */
+		Vector4f Color;
+	};
+
+	/**
+		@brief Per-tile state flags of a tile placed in a layer
+		
+		Stored on each @ref LayerTile to mark horizontal/vertical flipping, one-way collision and the runtime-only
+		state of a tile already queued in the active collapsing list. Supports a bitwise combination of its member
+		values.
+	*/
+	enum class LayerTileFlags : std::uint8_t {
+		None = 0x00,			/**< None */
+
+		FlipX = 0x01,			/**< Flipped horizontally */
+		FlipY = 0x02,			/**< Flipped vertically */
+
+		OneWay = 0x10,			/**< One-way collision */
+
+		Collapsing = 0x80		/**< Runtime-only: tile is already queued in the active collapsing list */
+	};
+
+	DEATH_ENUM_FLAGS(LayerTileFlags);
+
+	/**
+		@brief Represents a single tile placed in a tile map layer
+		
+		One entry of a layer's layout grid. It references a tile in the tile set (or an animated tile) together with
+		its packed parameters, flags, transparency and the suspend and destruct behavior; for destructible tiles it
+		also tracks the associated animation and the currently active frame (reused as collapse delay or trigger ID).
+	*/
+	struct LayerTile {
+		/** @brief Tile ID */
+		std::int32_t TileID;
+		/** @brief Tile parameters */
+		std::uint16_t TileParams;
+		/** @brief Tile flags */
+		LayerTileFlags Flags;
+		/** @brief Tile transparency */
+		std::uint8_t Alpha;
+		/** @brief Suspend type of tile */
+		SuspendType HasSuspendType;
+		/** @brief Destruct type of tile */
+		TileDestructType DestructType;
+		/** @brief Animation ID for destructible tile */
+		std::int32_t DestructAnimation;
+		/** @brief Denotes the specific frame from the above animation that is currently active --- Collapsible: Delay ("wait" parameter); Trigger: Trigger ID */
+		std::int32_t DestructFrameIndex;
+	};
+
+	/**
+		@brief Represents a single tile map layer
+		
+		Bundles a layer's grid of @ref LayerTile entries with its dimensions, its @ref LayerDescription and a
+		visibility flag. A @ref TileMap owns an ordered list of these layers, of which one is the main sprite layer
+		used for collision while the rest provide foreground and parallax background detail.
+	*/
+	struct TileMapLayer {
+		/** @brief Layer layout */
+		std::unique_ptr<LayerTile[]> Layout;
+		/** @brief Layer layout size */
+		Vector2i LayoutSize;
+		/** @brief Layer description */
+		LayerDescription Description;
+		/** @brief Layer visibility */
+		bool Visible;
+	};
+
+	/**
+		@brief Represents a single frame of an animated tile
+		
+		One entry in the frame sequence of an @ref AnimatedTile, referencing the static tile in the tile set that is
+		displayed while this frame is active.
+	*/
+	struct AnimatedTileFrame {
+		/** @brief Tile ID */
+		std::int32_t TileID;
+	};
+
+	/**
+		@brief Represents an animated tile
+		
+		Defines a tile whose appearance cycles through a sequence of @ref AnimatedTileFrame frames. Besides the frame
+		list it stores the playback timing (frame duration, optional fixed and random extra delays) and the current
+		playback state, and supports forward-only as well as ping-pong (forward then backward) animation.
+	*/
+	struct AnimatedTile {
+		/** @brief Individual tiles (frames) */
+		SmallVector<AnimatedTileFrame, 0> Tiles;
+		/** @brief Fixed number of extra animation frames that will show the last frame */
+		std::int16_t Delay;
+		/** @brief Maximum random number of extra animation frames that will show the last frame */
+		std::int16_t DelayJitter;
+		/** @brief Fixed number of extra animation frames that will show the last frame before the animation should start to play backward (if @ref IsPingPong is enabled) */
+		std::int32_t PingPongDelay;
+		/** @brief Current frame of the animation */
+		std::int32_t CurrentTileIdx;
+		/** @brief Duration of animation frame */
+		float FrameDuration;
+		/** @brief Frames left until animation advances */
+		float FramesLeft;
+		/** @brief Whether animation should play forward and then backward */
+		bool IsPingPong;
+		/** @brief Whether animation plays forward (if @ref IsPingPong is enabled) */
+		bool Forwards;
+	};
+
+	/**
+		@brief Represents a renderable tile map, consists of multiple layers
+		
+		Owns the level's tile layers and tile sets and renders them as a scene node. Besides drawing, it advances
+		animated tiles, performs tile collision queries, handles destructible/collapsing/trigger tiles and spawns
+		debris, notifying its @ref ITileMapOwner of the resulting events.
+	*/
+	class TileMap : public SceneNode // , public IResumable
+	{
+
+	public:
+		/** @{ @name Constants */
+
+		/** @brief Maximum number of triggers */
+		static constexpr std::int32_t TriggerCount = 32;
+		/** @brief Hardcoded offset for layer positioning */
+		static constexpr std::int32_t HardcodedOffset = 70;
+
+		/** @brief Mask of the tile index inside a packed tile value (see @ref GetTile()) */
+		static constexpr std::uint16_t TileIndexMask = 0x0FFF;
+		/** @brief Flag of a packed tile value that is flipped horizontally */
+		static constexpr std::uint16_t TileFlagFlipX = 0x1000;
+		/** @brief Flag of a packed tile value that is flipped vertically */
+		static constexpr std::uint16_t TileFlagFlipY = 0x2000;
+		/** @brief Flag of a packed tile value that refers to an animated tile (index is relative to the first animated tile) */
+		static constexpr std::uint16_t TileFlagAnimated = 0x4000;
+
+		/** @} */
+
+		/** @brief Flags that modify behaviour of @ref DestructibleDebris, supports a bitwise combination of its member values */
+		enum class DebrisFlags {
+			None = 0x00,				/**< None */
+			Disappear = 0x01,			/**< Debris disappears over time */
+			Bounce = 0x02,				/**< Debris bounces off solid tiles */
+			AdditiveBlending = 0x04,		/**< Debris is rendered with additive blending */
+			SimplifiedPhysics = 0x08		/**< Debris uses a cheap tile-cell collision approximation */
+		};
+
+		DEATH_PRIVATE_ENUM_FLAGS(DebrisFlags);
+
+		/** @brief Describes a visual debris (particle effect) */
+		struct DestructibleDebris {
+			/** @brief Position */
+			Vector2f Pos;
+			/** @brief Depth (layer) */
+			std::uint16_t Depth;
+
+			/** @brief Size */
+			Vector2f Size;
+			/** @brief Speed */
+			Vector2f Speed;
+			/** @brief Acceleration */
+			Vector2f Acceleration;
+
+			/** @brief Scale */
+			float Scale;
+			/** @brief Scale change speed */
+			float ScaleSpeed;
+
+			/** @brief Angle */
+			float Angle;
+			/** @brief Angle change speed */
+			float AngleSpeed;
+
+			/** @brief Alpha */
+			float Alpha;
+			/** @brief Alpha change speed */
+			float AlphaSpeed;
+
+			/** @brief Time remaining until disposal */
+			float Time;
+
+			/** @brief Texture horizontal scale */
+			float TexScaleX;
+			/** @brief Texture horizontal bias */
+			float TexBiasX;
+			/** @brief Texture vertical scale */
+			float TexScaleY;
+			/** @brief Texture vertical bias */
+			float TexBiasY;
+
+			/** @brief Diffuse texture */
+			Texture* DiffuseTexture;
+			/**
+			 * @brief Flat palette offset when @ref DiffuseTexture is an indexed sprite
+			 *
+			 * The sprite is recolored at draw time. `-1` when the texture holds baked colors (e.g., a tileset texture)
+			 * and must use the plain Sprite shader.
+			 */
+			std::int32_t PaletteOffset = -1;
+
+			/** @brief Behavior flags */
+			DebrisFlags Flags;
+		};
+
+		/**
+		 * @brief Creates a new instance
+		 *
+		 * @param tileSetPath   Relative path to the main tile set
+		 * @param captionTileId  Tile used to render the level-preview caption thumbnail
+		 * @param applyPalette   Whether to apply the tile set's palette to the live sprite palette
+		 */
+		TileMap(StringView tileSetPath, std::uint16_t captionTileId, bool applyPalette);
+		~TileMap();
+
+		/** @brief Returns `true` if all used tile sets are loaded */
+		bool IsValid() const;
+
+		/** @brief Sets an owner of tile map */
+		void SetOwner(ITileMapOwner* owner);
+		/** @brief Returns size of tile map in tiles */
+		Vector2i GetSize() const;
+		/** @brief Returns size of tile map in pixels */
+		Vector2i GetLevelBounds() const;
+		/** @brief Returns pit type */
+		PitType GetPitType() const;
+		/** @brief Sets pit type */
+		void SetPitType(PitType value);
+
+		void OnUpdate(float timeMult) override;
+		/** @brief Called at the end of each frame */
+		void OnEndFrame();
+		bool OnDraw(RenderQueue& renderQueue) override;
+
+		/** @brief Returns `true` if the mask of a tile on the main (sprite) layer is completely empty */
+		bool IsTileEmpty(std::int32_t tx, std::int32_t ty);
+		/** @brief Returns `true` if the tile on the main (sprite) layer can be destroyed by the player (read-only, no side effects) */
+		bool IsTileDestructible(std::int32_t tx, std::int32_t ty);
+		/** @brief Returns `true` if the tile on the main (sprite) layer is a one-way platform (passable from below) */
+		bool IsTileOneWay(std::int32_t tx, std::int32_t ty);
+		/** @brief Returns `true` if the given ~1/3 corner of the tile's collision mask is empty (cornerX/cornerY: -1 = left/top, +1 = right/bottom) */
+		bool IsTileCornerEmpty(std::int32_t tx, std::int32_t ty, std::int32_t cornerX, std::int32_t cornerY);
+		/** @brief Returns `true` if the tile's collision mask is neither fully empty nor fully filled (e.g., a slope or a thin solid band) */
+		bool IsTilePartiallySolid(std::int32_t tx, std::int32_t ty);
+		/** @brief Returns `true` if the tile on the main (sprite) layer is controlled by a trigger (toggled solid/empty by a trigger crate) */
+		bool IsTileTrigger(std::int32_t tx, std::int32_t ty);
+		/** @brief Returns `true` if the mask of tiles on the main (sprite) layer intersecting a given AABB is empty */
+		bool IsTileEmpty(const AABBf& aabb, TileCollisionParams& params);
+		/** @brief Returns `true` if tiles on the main (sprite) layer intersecting a given AABB can be destroyed */
+		bool CanBeDestroyed(const AABBf& aabb, TileCollisionParams& params);
+		/** @brief Returns suspend state of a given position */
+		SuspendType GetTileSuspendState(float x, float y);
+		/** @brief Advances descructible animation of a given tile */
+		bool AdvanceDestructibleTileAnimation(std::int32_t tx, std::int32_t ty, std::int32_t amount);
+
+		/** @brief Adds an additional tile set as a continuation of the previous one */
+		void AddTileSet(StringView tileSetPath, std::uint16_t offset, std::uint16_t count, const std::uint8_t* paletteRemapping = nullptr);
+		/** @brief Reads layer configuration from a stream */
+		void ReadLayerConfiguration(Stream& s);
+		/** @brief Reads description of animated tiles from a stream */
+		void ReadAnimatedTiles(Stream& s);
+		/** @brief Sets tile event flags */
+		void SetTileEventFlags(std::int32_t x, std::int32_t y, EventType tileEvent, std::uint8_t* tileParams);
+		/** @brief Overrides the diffuse texture of the specified tile */
+		bool OverrideTileDiffuse(std::int32_t tileId, StaticArrayView<(TileSet::DefaultTileSize + 2) * (TileSet::DefaultTileSize + 2), std::uint32_t> tileDiffuse);
+		/**
+		 * @brief Returns `true` if the tileset containing the given tile stores indexed (palette) diffuse
+		 *
+		 * When indexed, an overridden tile must be supplied as palette indices (red channel) rather than baked colors.
+		 */
+		bool IsTileSetIndexed(std::int32_t tileId);
+		/** @brief Overrides the collision mask of the specified tile */
+		bool OverrideTileMask(std::int32_t tileId, StaticArrayView<TileSet::DefaultTileSize * TileSet::DefaultTileSize, std::uint8_t> tileMask);
+
+		/** @brief Returns a caption tile */
+		StaticArrayView<TileSet::DefaultTileSize * TileSet::DefaultTileSize, Color> GetCaptionTile() const {
+			return _tileSets[0].Data->GetCaptionTile();
+		}
+
+		/** @brief Returns relative paths of all used tile sets */
+		Array<StringView> GetUsedTileSetPaths() const;
+		
+		/** @brief Creates a generic debris */
+		void CreateDebris(const DestructibleDebris& debris);
+		/** @brief Creates a tile debris */
+		void CreateTileDebris(std::int32_t tileId, std::int32_t x, std::int32_t y);
+		bool CanSpawnDestroyedTileEffects();
+		/** @brief Creates a particle debris from a sprite */
+		void CreateParticleDebris(const GraphicResource* res, Vector3f pos, Vector2f force, std::int32_t currentFrame, bool isFacingLeft);
+		/** @brief Creates a sprite debris */
+		void CreateSpriteDebris(const GraphicResource* res, Vector3f pos, std::int32_t count);
+
+		/** @brief Returns state of a given trigger */
+		bool GetTrigger(std::uint8_t triggerId);
+		/** @brief Sets state of a given trigger */
+		void SetTrigger(std::uint8_t triggerId, bool newState);
+
+		/** @brief Returns number of layers */
+		std::int32_t GetLayerCount() const {
+			return (std::int32_t)_layers.size();
+		}
+		/** @brief Returns size of a given layer in tiles, or an empty vector if the layer doesn't exist */
+		Vector2i GetLayerSize(std::int32_t layerIndex) const;
+		/**
+		 * @brief Returns the tile at the given coordinates on a given layer as a packed value
+		 *
+		 * The low 12 bits are the tile index (see @ref TileIndexMask), combined with @ref TileFlagFlipX / @ref
+		 * TileFlagFlipY / @ref TileFlagAnimated. Returns `0` if the layer or coordinates are out of range.
+		 */
+		std::uint16_t GetTile(std::int32_t layerIndex, std::int32_t x, std::int32_t y) const;
+		/**
+		 * @brief Sets the tile at the given coordinates on a given layer from a packed value
+		 *
+		 * The value is packed as in @ref GetTile(). Unrelated tile state (transparency, collision flags) is preserved.
+		 * Returns `false` if out of range.
+		 */
+		bool SetTile(std::int32_t layerIndex, std::int32_t x, std::int32_t y, std::uint16_t tileValue);
+
+		/** @brief Creates a checkpoint for eventual rollback */
+		void CreateCheckpointForRollback();
+		/** @brief Rolls back to the last checkpoint */
+		void RollbackToCheckpoint();
+
+		/** @brief Initializes tile map state from a stream */
+		void InitializeFromStream(Stream& src);
+		/** @brief Serializes tile map state to a stream */
+		void SerializeResumableToStream(Stream& dest, bool fromCheckpoint = false);
+
+		/** @brief Called when the viewport needs to be initialized (e.g., when the resolution is changed) */
+		void OnInitializeViewport();
+
+	private:
+		enum class LayerType {
+			Other,
+			Sky,
+			Sprite
+		};
+
+#ifndef DOXYGEN_GENERATING_OUTPUT
+		// Doxygen 1.12.0 outputs also private structs/unions even if it shouldn't
+		struct TileSetPart {
+			std::unique_ptr<TileSet> Data;
+			std::int32_t Offset;
+			std::int32_t Count;
+		};
+
+		class TexturedBackgroundPass : public SceneNode
+		{
+			friend class TileMap;
+
+		public:
+			TexturedBackgroundPass(TileMap* owner)
+				: _owner(owner), _alreadyRendered(false)
+			{
+			}
+
+			void Initialize();
+
+			bool OnDraw(RenderQueue& renderQueue) override;
+
+		private:
+			TileMap* _owner;
+			std::unique_ptr<Texture> _target;
+			std::unique_ptr<Viewport> _view;
+			std::unique_ptr<Camera> _camera;
+			SmallVector<std::unique_ptr<RenderCommand>, 0> _renderCommands;
+			bool _alreadyRendered;
+		};
+#endif
+
+		ITileMapOwner* _owner;
+		std::int32_t _sprLayerIndex;
+		PitType _pitType;
+
+		SmallVector<TileSetPart, 2> _tileSets;
+		SmallVector<TileMapLayer, 0> _layers;
+		std::unique_ptr<LayerTile[]> _sprLayerForRollback;
+		SmallVector<AnimatedTile, 0> _animatedTiles;
+		SmallVector<Vector2i, 0> _activeCollapsingTiles;
+		float _collapsingTimer;
+		std::uint32_t _animatedTilesOffset;
+		BitArray _triggerState;
+		BitArray _triggerStateForRollback;
+
+		SmallVector<DestructibleDebris, 0> _debrisList;
+		SmallVector<std::unique_ptr<RenderCommand>, 0> _renderCommands;
+		std::int32_t _renderCommandsCount;
+
+#if defined(TILEMAP_USE_SINGLE_DRAW)
+		// Per-frame pools for whole-layer tile meshes, replacing the per-tile commands. One vertex buffer is filled
+		// per drawn tile layer; each layer mesh is then split into chunks that individually fit the shared array
+		// buffer limit (64 KB), so a layer emits one command per chunk (usually just one). Both pools grow on demand
+		// and reset in OnEndFrame(); host vertex pointers reference the buffers until the render queue is flushed, so
+		// a buffer is never reused within a frame (across viewports the counts simply keep growing).
+		SmallVector<SmallVector<float, 0>, 0> _layerMeshVertices;
+		SmallVector<std::unique_ptr<RenderCommand>, 0> _layerMeshCommands;
+		std::int32_t _layerMeshVerticesCount = 0;
+		std::int32_t _layerMeshCommandCount = 0;
+
+#if defined(DEATH_TARGET_PSP)
+		struct PspLayerMeshCache {
+			std::int32_t TileAbsX = 0;
+			std::int32_t TileAbsY = 0;
+			std::int32_t Columns = 0;
+			std::int32_t Rows = 0;
+			std::uint32_t VisualRevision = ~0u;
+			bool RepeatX = false;
+			bool RepeatY = false;
+			SmallVector<SmallVector<float, 0>, 0> PageVertices;
+		};
+
+		// Only the viewport-sized visible mesh is cached per layer. Vertex positions are relative to the current
+		// tile-window origin, allowing sub-tile camera/parallax motion to update through one model translation.
+		SmallVector<PspLayerMeshCache, 0> _pspLayerMeshCaches;
+		std::uint32_t _tileVisualRevision = 0;
+		std::int32_t _destroyedTileEffectsThisFrame = 0;	// Reset in OnEndFrame; budgets destruction sound/debris
+
+		// PSP debris uses the same compact host-mesh route as tile layers. Buffers and commands are pooled because
+		// their host pointers must remain valid from scene visit until the deferred render queue is emitted.
+		SmallVector<SmallVector<float, 0>, 0> _debrisMeshVertices;
+		SmallVector<std::unique_ptr<RenderCommand>, 0> _debrisMeshCommands;
+		std::int32_t _debrisMeshVerticesCount = 0;
+		std::int32_t _debrisMeshCommandCount = 0;
+#endif
+#endif
+
+		std::int32_t _texturedBackgroundLayer;
+		TexturedBackgroundPass _texturedBackgroundPass;
+
+		void DrawLayer(RenderQueue& renderQueue, TileMapLayer& layer, const Rectf& cullingRect, Vector2f viewCenter);
+		static float TranslateCoordinate(float coordinate, float speed, float offset, std::int32_t viewSize, bool isY);
+		RenderCommand* RentRenderCommand(LayerRendererType type, bool indexed = false);
+#if defined(TILEMAP_USE_SINGLE_DRAW)
+		// Appends one tile's two triangles (6 vertices, 8 floats each: position.xy, texcoords.xy, color.rgba) to a
+		// layer mesh buffer. Color is (1,1,1,alpha); the layer tint is applied via the command's instance color.
+		static void AppendTileQuad(SmallVector<float, 0>& vertices, float x, float y, float size,
+			float texScaleX, float texBiasX, float texScaleY, float texBiasY, float alpha);
+		// Emits the accumulated tile-layer mesh as one or more render commands (split into <=64 KB chunks)
+		void EmitLayerMesh(RenderQueue& renderQueue, SmallVector<float, 0>& vertices, TileSet* tileSet, const Vector4f& layerColor, std::uint16_t depth);
+#if defined(DEATH_TARGET_PSP)
+		void EmitPspCachedLayerMesh(RenderQueue& renderQueue, PspLayerMeshCache& cache, TileSet* tileSet,
+			const Vector4f& layerColor, std::uint16_t depth, float originX, float originY);
+#endif
+#endif
+
+		bool AdvanceDestructibleTileAnimation(LayerTile& tile, std::int32_t tx, std::int32_t ty, std::int32_t& amount, StringView soundName);
+		void AdvanceCollapsingTileTimers(float timeMult);
+		void SetTileDestructibleEventParams(LayerTile& tile, TileDestructType type, std::uint16_t tileParams);
+		std::int32_t GetTileDestructibleFrameCount(const LayerTile& tile);
+
+		void UpdateDebris(float timeMult);
+		void DrawDebris(RenderQueue& renderQueue);
+
+		void RenderTexturedBackground(RenderQueue& renderQueue, const Rectf& cullingRect, Vector2f viewCenter, TileMapLayer& layer, float x, float y);
+
+		TileSet* ResolveTileSet(std::int32_t& tileId);
+		std::int32_t ResolveTileID(const LayerTile& tile) const;
+	};
+}

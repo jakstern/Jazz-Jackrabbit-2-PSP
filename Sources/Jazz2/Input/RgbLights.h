@@ -1,0 +1,148 @@
+﻿#pragma once
+
+#include "../../Main.h"
+#include "../../nCine/Primitives/Color.h"
+#include "../../nCine/Base/FrameTimer.h"
+
+#if defined(DEATH_TARGET_EMSCRIPTEN)
+#	include <emscripten/emscripten.h>
+#	include <emscripten/websocket.h>
+#endif
+
+#include <CommonWindows.h>
+
+using namespace nCine;
+
+#ifndef DOXYGEN_GENERATING_OUTPUT
+#define AURA_REFRESH_INTERVAL 40		// 40 ms
+#define AURA_COLORS_SIZE (4 + 105)		// 4 Main colors + Keyboard mapping = 327 bytes, see AuraLight struct
+#define AURA_COLORS_LIMITED_SIZE 4		// Only first 4 main colors
+#define AURA_KEYBOARD_WIDTH 22
+#define AURA_KEYBOARD_HEIGHT 6
+
+#if defined(DEATH_TARGET_WINDOWS)
+namespace ChromaSDK::Keyboard
+{
+	//! Chroma keyboard effect types
+	typedef enum EFFECT_TYPE {
+		CHROMA_NONE = 0,			//!< No effect.
+		CHROMA_BREATHING,			//!< Breathing effect (This effect has deprecated and should not be used).
+		CHROMA_CUSTOM,				//!< Custom effect.
+		CHROMA_REACTIVE,			//!< Reactive effect (This effect has deprecated and should not be used).
+		CHROMA_STATIC,				//!< Static effect.
+		CHROMA_SPECTRUMCYCLING,		//!< Spectrum cycling effect (This effect has deprecated and should not be used).
+		CHROMA_WAVE,				//!< Wave effect (This effect has deprecated and should not be used).
+		CHROMA_RESERVED,			//!< Reserved.
+		CHROMA_CUSTOM_KEY,			//!< Custom effects with keys.
+		CHROMA_CUSTOM2,
+		CHROMA_INVALID				//!< Invalid effect.
+	} EFFECT_TYPE;
+
+	//! Maximum number of rows in a keyboard.
+	const std::size_t MAX_ROW = 6;
+
+	//! Maximum number of columns in a keyboard.
+	const std::size_t MAX_COLUMN = 22;
+
+	//! Custom effect (This effect type has deprecated and should not be used).
+	typedef struct CUSTOM_EFFECT_TYPE {
+		COLORREF Color[MAX_ROW][MAX_COLUMN];	//!< Grid layout. 6 rows by 22 columns.
+	} CUSTOM_EFFECT_TYPE;
+}
+#endif
+#endif
+
+namespace Jazz2::Input
+{
+	/**
+		@brief Individual lights of @ref RgbLights service
+		
+		Enumerates every separately addressable light exposed by the lighting service, used to index into
+		the color array passed to @ref RgbLights::Update(). It begins with the primary accent lights
+		(logo, secondary, tertiary and keyboard logo) and continues with one entry per physical keyboard
+		key arranged in row order.
+	*/
+	enum struct AuraLight
+	{
+		// Primary / Logo / Center
+		Primary,
+		// Secondary / Scroll / Left
+		Secondary,
+		// Tertiary / Underglow / Right
+		Tertiary,
+		// Keyboard Logo
+		KeyboardLogo,
+
+		Esc, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, PrintScreen, ScrollLock,
+		PauseBreak, Tilde, One, Two, Three, Four, Five, Six, Seven, Eight, Nine, Zero,
+		Minus, Equals, Backspace, Insert, Home, PageUp, NumLock, NumSlash, NumAsterisk, NumMinus,
+		Tab, Q, W, E, R, T, Y, U, I, O, P, OpenBracket, CloseBracket, Enter, Delete, End,
+		PageDown, NumSeven, NumEight, NumNine, NumPlus, CapsLock, A, S, D, F, G, H, J, K, L,
+		Semicolon, Apostrophe, Backslash, NumFour, NumFive, NumSix, LeftShift, NonUsBackslash,
+		Z, X, C, V, B, N, M, Comma, Period, Slash, RightShift, ArrowUp, NumOne, NumTwo, NumThree, NumEnter,
+		LeftCtrl, LeftWindows, LeftAlt, Space, RightAlt, Fn, Menu, RightCtrl,
+		ArrowLeft, ArrowDown, ArrowRight, NumZero, NumPeriod,
+
+		Unknown = -1					/**< Unknown light */
+	};
+
+	/**
+		@brief Provides access to RGB lights from various peripherals
+		
+		Drives the per-key and accent RGB lighting of supported peripherals (such as Razer Chroma
+		keyboards, or a browser bridge on Emscripten), pushing updated colors and clearing them on
+		shutdown. Exposed as a single shared instance via @ref Get().
+	*/
+	class RgbLights
+	{
+	public:
+		/** @{ @name Constants */
+
+		/** @brief Maximum number of individual lights */
+		static constexpr std::int32_t ColorsSize = AURA_COLORS_SIZE;
+		/** @brief Refresh rate of the lighting */
+		static constexpr std::int32_t RefreshRate = (std::int32_t)(FrameTimer::FramesPerSecond / (1000 / AURA_REFRESH_INTERVAL));
+
+		/** @} */
+
+		/** @brief Creates a new instance */
+		RgbLights();
+		~RgbLights();
+
+		/** @brief Returns `true` if the feature is supported */
+		bool IsSupported() const;
+
+		/** @brief Updates colors of the lights */
+		void Update(Color colors[ColorsSize]);
+		/** @brief Resets colors of the light to default settings */
+		void Clear();
+
+		/** @brief Returns static instance of @ref RgbLights */
+		static RgbLights& Get();
+
+	private:
+		RgbLights(const RgbLights&) = delete;
+		RgbLights& operator=(const RgbLights&) = delete;
+
+#if defined(DEATH_TARGET_WINDOWS) && !defined(DEATH_TARGET_WINDOWS_RT)
+		using RzInit = int (*)();
+		using RzUnInit = int (*)();
+		using RzCreateKeyboardEffect = int (*)(ChromaSDK::Keyboard::EFFECT_TYPE Effect, void* pParam, void* pEffectId);
+
+		HMODULE _hLib;
+		RzUnInit _UnInit;
+		RzCreateKeyboardEffect _CreateKeyboardEffect;
+		Color _lastColors[ColorsSize];
+#elif defined(DEATH_TARGET_EMSCRIPTEN)
+		std::uint32_t _updateCount;
+		EMSCRIPTEN_WEBSOCKET_T _ws;
+		bool _isConnected;
+		Color _lastColors[ColorsSize];
+
+		static EM_BOOL emscriptenOnOpen(std::int32_t eventType, const EmscriptenWebSocketOpenEvent* websocketEvent, void* userData);
+		static EM_BOOL emscriptenOnError(std::int32_t eventType, const EmscriptenWebSocketErrorEvent* websocketEvent, void* userData);
+		static EM_BOOL emscriptenOnClose(std::int32_t eventType, const EmscriptenWebSocketCloseEvent* websocketEvent, void* userData);
+		static EM_BOOL emscriptenOnMessage(std::int32_t eventType, const EmscriptenWebSocketMessageEvent* websocketEvent, void* userData);
+#endif
+	};
+}

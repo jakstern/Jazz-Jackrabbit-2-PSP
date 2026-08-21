@@ -1,0 +1,36 @@
+﻿#pragma once
+
+#if defined(WITH_MULTIPLAYER) || defined(DOXYGEN_GENERATING_OUTPUT)
+
+#include "PlayerOnServer.h"
+
+namespace Jazz2::Actors::Multiplayer
+{
+	/**
+		@brief Local player in online session
+
+		The host's own locally-controlled player on the server. It is a @ref PlayerOnServer driven directly by local
+		input rather than synchronized from a remote peer.
+	*/
+	class LocalPlayerOnServer : public PlayerOnServer
+	{
+		DEATH_RUNTIME_OBJECT(PlayerOnServer);
+
+	public:
+		/**
+		 * @brief Creates a new instance
+		 *
+		 * @param peerDesc  Descriptor of the peer this player belongs to
+		 */
+		LocalPlayerOnServer(std::shared_ptr<PeerDescriptor> peerDesc);
+
+	protected:
+		void OnUpdate(float timeMult) override;
+		void SetCurrentWeapon(WeaponType weaponType, SetCurrentWeaponReason reason) override;
+
+		/** @brief Emits weapon flare */
+		void EmitWeaponFlare() override;
+	};
+}
+
+#endif

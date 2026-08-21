@@ -1,0 +1,8 @@
+	.section .rodata
+	.balign 16
+	.global g_embeddedContentStart
+	.global g_embeddedContentEnd
+g_embeddedContentStart:
+	.incbin "@EMBEDDED_CONTENT_ARCHIVE@"
+g_embeddedContentEnd:
+	.balign 16

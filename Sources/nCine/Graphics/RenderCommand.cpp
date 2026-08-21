@@ -1,0 +1,187 @@
+#include "RenderCommand.h"
+#include "GL/GLShaderProgram.h"
+#include "GL/GLScissorTest.h"
+#include "RenderResources.h"
+#include "Camera.h"
+#include "DrawableNode.h"
+#include "../tracy.h"
+
+namespace nCine
+{
+	RenderCommand::RenderCommand(Type type)
+		: materialSortKey_(0), modelMatrixUniform_(nullptr), instanceBlock_(nullptr), cachedShaderChangeCounter_(std::uint32_t(-1)),
+			layer_(0), numInstances_(0), batchSize_(0), transformationCommitted_(false), modelMatrixUniformInBlock_(false),
+			modelMatrix_(Matrix4x4f::Identity)
+#if defined(NCINE_PROFILING)
+			, type_(type)
+#endif
+	{
+	}
+
+	RenderCommand::RenderCommand()
+		: RenderCommand(Type::Unspecified)
+	{
+	}
+
+	void RenderCommand::CalculateMaterialSortKey()
+	{
+		const std::uint64_t upper = std::uint64_t(GetLayerSortKey()) << 32;
+		const std::uint32_t lower = material_.GetSortKey();
+		materialSortKey_ = upper | lower;
+	}
+
+	void RenderCommand::Issue()
+	{
+		ZoneScopedC(0x81A861);
+
+		if (geometry_.numVertices_ == 0 && geometry_.numIndices_ == 0) {
+			return;
+		}
+
+#if defined(DEATH_TARGET_PSP)
+		// On PSP there are no shaders; emit this command through the GU instead of the GL draw path below.
+		void PspEmitCommand(RenderCommand&);
+		PspEmitCommand(*this);
+		return;
+#endif
+
+		material_.Bind();
+		material_.CommitUniforms();
+
+		GLScissorTest::State scissorTestState = GLScissorTest::GetState();
+		if (scissorRect_.W > 0 && scissorRect_.H > 0) {
+			GLScissorTest::Enable(scissorRect_);
+		}
+
+		std::uint32_t offset = 0;
+#if (defined(WITH_OPENGLES) && !GL_ES_VERSION_3_2) || defined(DEATH_TARGET_EMSCRIPTEN)
+		// Simulating missing `glDrawElementsBaseVertex()` on OpenGL ES 3.0
+		if (geometry_.numIndices_ > 0) {
+			offset = geometry_.GetVboParams().offset + (geometry_.firstVertex_ * geometry_.numElementsPerVertex_ * sizeof(GLfloat));
+		}
+#endif
+		material_.DefineVertexFormat(geometry_.GetVboParams().object, geometry_.GetIboParams().object, offset);
+		geometry_.Bind();
+		geometry_.Draw(numInstances_);
+
+		GLScissorTest::SetState(scissorTestState);
+	}
+
+	void RenderCommand::SetScissor(GLint x, GLint y, GLsizei width, GLsizei height)
+	{
+		scissorRect_.Set(x, y, width, height);
+	}
+
+	void RenderCommand::SetTransformation(const Matrix4x4f& modelMatrix)
+	{
+		modelMatrix_ = modelMatrix;
+		transformationCommitted_ = false;
+	}
+
+	void RenderCommand::RefreshCachedUniforms()
+	{
+		// The name-based lookups only have to run again after `Material::SetShaderProgram()`,
+		// the resulting pointers stay valid because the caches are only rebuilt there
+		if (cachedShaderChangeCounter_ == material_.shaderChangeCounter_) {
+			return;
+		}
+
+		instanceBlock_ = material_.UniformBlock(Material::InstanceBlockName);
+		modelMatrixUniform_ = (instanceBlock_ != nullptr
+			? instanceBlock_->GetUniform(Material::ModelMatrixUniformName)
+			: material_.Uniform(Material::ModelMatrixUniformName));
+		modelMatrixUniformInBlock_ = (instanceBlock_ != nullptr);
+		cachedShaderChangeCounter_ = material_.shaderChangeCounter_;
+	}
+
+	GLUniformBlockCache* RenderCommand::GetInstanceBlock()
+	{
+		if (material_.shaderProgram_ == nullptr) {
+			return nullptr;
+		}
+		RefreshCachedUniforms();
+		return instanceBlock_;
+	}
+
+	void RenderCommand::CommitNodeTransformation()
+	{
+		if (transformationCommitted_) {
+			return;
+		}
+
+		ZoneScopedC(0x81A861);
+
+		const Camera::ProjectionValues cameraValues = RenderResources::GetCurrentCamera()->GetProjectionValues();
+		modelMatrix_[3][2] = CalculateDepth(layer_, cameraValues.nearClip, cameraValues.farClip);
+
+		if (material_.shaderProgram_ && material_.shaderProgram_->GetStatus() == GLShaderProgram::Status::LinkedWithIntrospection) {
+			RefreshCachedUniforms();
+			if (modelMatrixUniform_) {
+				//ZoneScopedNC("Set model matrix", 0x81A861);
+				modelMatrixUniform_->SetFloatVector(modelMatrix_.Data());
+				if (!modelMatrixUniformInBlock_) {
+					// The loose uniform was written through a cached pointer, so the material's
+					// uniform manager has to be notified for its commit early-out check
+					material_.shaderUniforms_.MarkDirty();
+				}
+			}
+		}
+
+		transformationCommitted_ = true;
+	}
+
+	void RenderCommand::CommitCameraTransformation()
+	{
+		ZoneScopedC(0x81A861);
+
+#if defined(DEATH_TARGET_PSP)
+		// No shader/UBO camera uniforms on PSP - the GU emitter applies the camera transform itself. The material's
+		// shader program is null (fake-GL), so skip to avoid dereferencing it in GLShaderUniforms::SetProgram (0x18).
+		if (material_.shaderProgram_ == nullptr) {
+			return;
+		}
+#endif
+		RenderResources::CameraUniformData* cameraUniformData = RenderResources::FindCameraUniformData(material_.shaderProgram_);
+		if (cameraUniformData == nullptr) {
+			RenderResources::CameraUniformData newCameraUniformData;
+			newCameraUniformData.shaderUniforms.SetProgram(material_.shaderProgram_, Material::ProjectionViewMatrixExcludeString, nullptr);
+			if (newCameraUniformData.shaderUniforms.GetUniformCount() == 2) {
+				newCameraUniformData.shaderUniforms.SetUniformsDataPointer(RenderResources::GetCameraUniformsBuffer());
+				newCameraUniformData.shaderUniforms.GetUniform(Material::ProjectionMatrixUniformName)->SetDirty(true);
+				newCameraUniformData.shaderUniforms.GetUniform(Material::ViewMatrixUniformName)->SetDirty(true);
+				newCameraUniformData.shaderUniforms.CommitUniforms();
+
+				RenderResources::InsertCameraUniformData(material_.shaderProgram_, std::move(newCameraUniformData));
+			}
+		} else {
+			cameraUniformData->shaderUniforms.CommitUniforms();
+		}
+	}
+
+	void RenderCommand::CommitAll()
+	{
+#if defined(DEATH_TARGET_PSP)
+		// The PSP emitter reads host geometry and the command's stashed sprite data directly. Copying host meshes
+		// into the fake common GL buffers and committing shader uniform blocks cannot affect GU output, but costs CPU
+		// once per command (especially visible for two-pass sign text). Keep only the model/depth finalization.
+		CommitNodeTransformation();
+		return;
+#endif
+		// Copy the vertices and indices stored in host memory to video memory
+		// This step is not needed if the command uses a custom VBO or IBO or directly writes into the common one
+		geometry_.CommitVertices();
+		geometry_.CommitIndices();
+
+		// The model matrix should always be updated before committing uniform blocks
+		CommitNodeTransformation();
+
+		// Commits all the uniform blocks of command's shader program
+		material_.CommitUniformBlocks();
+	}
+
+	float RenderCommand::CalculateDepth(std::uint16_t layer, float nearClip, float farClip)
+	{
+		// The layer translates to depth, from near to far
+		return nearClip + LayerStep + (farClip - nearClip - LayerStep) * layer * LayerStep;
+	}
+}

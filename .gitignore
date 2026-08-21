@@ -1,0 +1,29 @@
+# Build output
+/Build/
+/build/
+/dist/
+*.o
+*.a
+*.elf
+*.prx
+EBOOT.PBP
+PARAM.SFO
+
+# Host tool build dirs
+/Tools/*/build/
+
+# Local development Makefile: personal paths, deploy targets, test levers
+/Makefile.local
+
+# Logs (engine debug.log, tool run logs, captured build output)
+*.log
+
+# Editor / OS / agent
+.DS_Store
+*.swp
+.vscode/
+.idea/
+.claude/
+
+# Runtime assets & converted game data (game data, not source - see DEPENDENCIES.md)
+/Cache/

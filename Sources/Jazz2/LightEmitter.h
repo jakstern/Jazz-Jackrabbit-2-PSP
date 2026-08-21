@@ -1,0 +1,28 @@
+﻿#pragma once
+
+#include "../nCine/Primitives/Vector2.h"
+
+using namespace nCine;
+
+namespace Jazz2
+{
+	/**
+		@brief Allows objects to emit light
+		
+		Per-object light description (position, intensity, brightness and near/far radii) collected each frame and fed
+		to the lighting renderer to illuminate the scene.
+	*/
+	struct LightEmitter
+	{
+		/** @brief Light position */
+		Vector2f Pos;
+		/** @brief Light intensity */
+		float Intensity;
+		/** @brief Light brightness */
+		float Brightness;
+		/** @brief Light near radius */
+		float RadiusNear;
+		/** @brief Light far radius */
+		float RadiusFar;
+	};
+}

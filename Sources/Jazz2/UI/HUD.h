@@ -1,0 +1,231 @@
+﻿#pragma once
+
+#include "Canvas.h"
+#include "Font.h"
+#include "../LevelHandler.h"
+#include "../Actors/Player.h"
+#include "../Input/ControlScheme.h"
+#include "../Input/RgbLights.h"
+#include "../Rendering/PlayerViewport.h"
+
+#include "../../nCine/Input/InputEvents.h"
+
+
+namespace Jazz2::UI
+{
+	/**
+		@brief Player HUD
+		
+		In-game heads-up display drawn on top of the level. It renders the player's health, score, collected coins and
+		gems, active weapon and ammo, boss health, transient level text notifications, and the weapon wheel, as well as
+		on-screen touch controls and fade transitions. Individual elements are drawn through overridable `OnDraw*`
+		methods so subclasses (e.g., multiplayer) can customize them.
+	*/
+	class HUD : public Canvas
+	{
+
+	public:
+#ifndef DOXYGEN_GENERATING_OUTPUT
+		static constexpr float DpadLeft = 0.02f;
+		static constexpr float DpadBottom = 0.1f;
+		static constexpr float DpadThreshold = 0.09f;
+		static constexpr float DpadSize = 0.37f;
+		static constexpr float ButtonSize = 0.172f;
+		static constexpr float SmallButtonSize = 0.098f;
+#endif
+
+		/** @brief Creates a new instance */
+		HUD(LevelHandler* levelHandler);
+		~HUD();
+
+		void OnUpdate(float timeMult) override;
+		bool OnDraw(RenderQueue& renderQueue) override;
+		/** @brief Called when a touch event occurs, allowing the HUD to override actions and movement */
+		void OnTouchEvent(const TouchEvent& event, std::uint32_t& overrideActions, Vector2f& overrideMovement);
+
+		/** @brief Shows a text notification */
+		void ShowLevelText(StringView text);
+		/** @brief Shows a notification about coins */
+		void ShowCoins(std::int32_t count);
+		/** @brief Shows a notification about gems */
+		void ShowGems(std::uint8_t gemType, std::int32_t count);
+
+		/** @brief Begins a fullscreen fade-in transition */
+		void BeginFadeIn(bool skip);
+		/** @brief Begins a fullscreen face-out transition */
+		void BeginFadeOut(float delay = 0.0f);
+
+		/** @brief Returns `true` if weapon wheel is visible */
+		bool IsWeaponWheelVisible(std::int32_t playerIndex) const;
+
+		/** @brief Rebuilds internal touch button data from current @ref PreferencesCache::TouchButtons configuration */
+		void RefreshTouchButtons();
+
+	protected:
+#ifndef DOXYGEN_GENERATING_OUTPUT
+		// Doxygen 1.12.0 outputs also private structs/unions even if it shouldn't
+		struct TouchButtonInfo {
+			PlayerAction Action;
+
+			float Left;
+			float Top;
+			float Width;
+			float Height;
+
+			GraphicResource* Graphics;
+			std::int32_t CurrentPointerId;
+			Alignment Align;
+		};
+
+		struct Vertex {
+			float X, Y;
+			float U, V;
+
+			Vertex()
+				: X(0.0f), Y(0.0f), U(0.0f), V(0.0f) {}
+			Vertex(float x, float y, float u, float v)
+				: X(x), Y(y), U(u), V(v) {}
+		};
+
+		struct WeaponWheelState {
+			SmallVector<std::unique_ptr<RenderCommand>, 0> RenderCommands;
+			std::unique_ptr<Vertex[]> Vertices;
+			std::int32_t WeaponCount;
+			std::int32_t  RenderCommandsCount;
+			std::int32_t VerticesCount;
+			std::int32_t LastIndex;
+			float Anim;
+			bool Shown;
+
+			WeaponWheelState();
+		};
+#endif
+
+		/** @{ @name Constants */
+
+		/** @brief Main layer */
+		static constexpr std::uint16_t MainLayer = 100;
+		/** @brief Shadow for main layer */
+		static constexpr std::uint16_t ShadowLayer = 80;
+		/** @brief Font layer */
+		static constexpr std::uint16_t FontLayer = 200;
+		/** @brief Shadow for font layer */
+		static constexpr std::uint16_t FontShadowLayer = 120;
+		/** @brief Touch buttons layer */
+		static constexpr std::uint16_t TouchButtonsLayer = 400;
+
+		/** @} */
+		
+#ifndef DOXYGEN_GENERATING_OUTPUT
+		LevelHandler* _levelHandler;
+		Metadata* _metadata;
+		// Indexed copy of the HUD metadata (loaded on demand), used to draw the recolored player character icon
+		Metadata* _metadataIndexed;
+		Font* _smallFont;
+
+		String _levelText;
+		float _levelTextTime;
+		std::int32_t _coins;
+		std::int32_t _gems;
+		float _coinsTime;
+		float _gemsTime;
+		std::uint8_t _gemsLastType;
+		float _activeBossTime;
+#endif
+
+		/** @brief Called when some overview information of the player needs to be drawn */
+		virtual void OnDrawOverview(const Rectf& view, const Rectf& adjustedView, Actors::Player* player);
+		/** @brief Called when health of the player needs to be drawn */
+		virtual void OnDrawHealth(const Rectf& view, const Rectf& adjustedView, Actors::Player* player);
+		/** @brief Called when score of the player needs to be drawn */
+		virtual void OnDrawScore(const Rectf& view, Actors::Player* player);
+		/** @brief Called when weapon ammo of the player needs to be drawn */
+		virtual void OnDrawWeaponAmmo(const Rectf& adjustedView, Actors::Player* player);
+		/** @brief Called when health of the active boss needs to be drawn */
+		virtual void OnDrawActiveBoss(const Rectf& adjustedView);
+		/** @brief Called when a text notification needs to be drawn */
+		virtual void OnDrawLevelText(std::int32_t& charOffset);
+		/** @brief Called when a notification about coins of the player needs to be drawn */
+		virtual void OnDrawCoins(const Rectf& view, std::int32_t& charOffset);
+		/** @brief Called when a notification about gems of the player needs to be drawn */
+		virtual void OnDrawGems(const Rectf& view, std::int32_t& charOffset);
+		/** @brief Called when touch buttons need to be drawn */
+		void OnDrawTouchButtons(Actors::Player* player);
+		/** @brief Returns `true` and the on-screen bounds of the touch pause button if it's currently visible */
+		bool GetTouchPauseButtonRect(Rectf& bounds) const;
+
+		/** @brief Draws carrotized health bar (Reforged) */
+		void DrawHealthCarrots(float x, float y, std::int32_t health);
+		/** @brief Draws separators of split-screen viewports */
+		void DrawViewportSeparators();
+		/** @brief Draws a textured element */
+		void DrawElement(AnimState state, std::int32_t frame, float x, float y, std::uint16_t z, Alignment align, const Colorf& color,
+			float scaleX = 1.0f, float scaleY = 1.0f, bool additiveBlending = false, float angle = 0.0f);
+		/**
+		 * @brief Draws a textured element recolored through a player palette (PaletteRemap shader)
+		 *
+		 * Returns `false` if it can't (no indexed metadata or the element isn't an indexed sprite) so the caller can
+		 * fall back.
+		 */
+		bool DrawElementWithPalette(AnimState state, std::int32_t frame, float x, float y, std::uint16_t z, Alignment align,
+			const Colorf& color, float paletteOffset, float scaleX = 1.0f, float scaleY = 1.0f);
+		/** @brief Draws a textured element with clipping */
+		void DrawElementClipped(AnimState state, std::int32_t frame, float x, float y, std::uint16_t z, Alignment align,
+			const Colorf& color, float clipX, float clipY);
+	
+	private:
+		enum class TransitionState {
+			None,
+			WaitingForFadeIn,
+			FadeIn,
+			FadeOut,
+			WaitingForFadeOut
+		};
+
+		static constexpr std::uint32_t VertexBytes = sizeof(Vertex);
+		static constexpr std::uint32_t VertexFloats = VertexBytes / sizeof(float);
+
+		static constexpr Alignment Fixed = (Alignment)0x40;
+		static constexpr Alignment AllowRollover = (Alignment)0x80;
+
+		static constexpr std::int32_t TouchButtonsCount = 11;
+		static constexpr float WeaponWheelAnimDuration = 20.0f;
+		static constexpr std::int32_t WeaponWheelMaxVertices = 768;
+		static constexpr float DefaultRef = LevelHandler::DefaultWidth * 0.5f; // = 360.0f
+
+		float _rgbAmbientLight;
+		float _rgbHealthLast;
+
+		WeaponWheelState _weaponWheel[ControlScheme::MaxSupportedPlayers];
+		float _rgbLightsAnim;
+		float _rgbLightsTime;
+		TransitionState _transitionState;
+		float _transitionTime;
+
+		TouchButtonInfo _touchButtons[TouchButtonsCount];
+		float _touchButtonsTimer;
+
+		// Floating analog joystick state
+		bool _joystickActive;
+		Vector2f _joystickOrigin;
+		Vector2f _joystickCurrent;
+		std::int32_t _joystickPointerId;
+		float _joystickMaxRadius;
+
+		AnimState GetCurrentWeapon(Actors::Player* player, WeaponType weapon, Vector2f& offset);
+		void DrawWeaponWheel(const Rectf& view, Actors::Player* player);
+		void UpdateWeaponWheel(float timeMult);
+		bool PrepareWeaponWheel(Actors::Player* player, std::int32_t& weaponCount);
+		static std::int32_t GetWeaponCount(Actors::Player* player);
+		void DrawWeaponWheelSegment(WeaponWheelState& state, float x, float y, float width, float height, std::uint16_t z, float minAngle, float maxAngle, const Texture& texture, const Colorf& color);
+
+		TouchButtonInfo MakeTouchButton(PlayerAction action, AnimState state, Alignment align, float edgeX, float edgeY, float w, float h);
+		TouchButtonInfo CreateTouchButton(PlayerAction action, AnimState state, Alignment align, float x, float y, float w, float h);
+		bool IsOnButton(const TouchButtonInfo& button, float x, float y);
+		void DrawJoystick(float centerX, float centerY, float outerRadius, float innerRadius, float thumbX, float thumbY);
+
+		void UpdateRgbLights(float timeMult, Rendering::PlayerViewport* viewport);
+		static Color ApplyRgbGradientAlpha(Color color, std::int32_t x, std::int32_t y, float animProgress, float ambientLight);
+		static AuraLight KeyToAuraLight(Keys key);
+	};
+}

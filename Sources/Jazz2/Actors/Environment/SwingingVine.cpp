@@ -1,0 +1,176 @@
+#include "SwingingVine.h"
+#include "../../ContentResolver.h"
+#include "../../ILevelHandler.h"
+#include "../../Events/EventMap.h"
+#include "../Player.h"
+
+#include "../../../nCine/Graphics/RenderQueue.h"
+
+namespace Jazz2::Actors::Environment
+{
+	SwingingVine::SwingingVine()
+		: _angle(0.0f), _phase(0.0f), _justTurned(false)
+	{
+	}
+
+	SwingingVine::~SwingingVine()
+	{
+		auto players = _levelHandler->GetPlayers();
+		for (auto* player : players) {
+			player->CancelCarryingObject(this);
+		}
+	}
+
+	Task<bool> SwingingVine::OnActivatedAsync(const ActorActivationDetails& details)
+	{
+		SetState(ActorState::SkipPerPixelCollisions, true);
+		SetState(ActorState::CanBeFrozen | ActorState::CollideWithTileset | ActorState::ApplyGravitation, false);
+
+		async_await RequestMetadataAsync("Object/SwingingVine"_s);
+
+		SetAnimation(AnimState::Default);
+
+		_phase = _originTile.X + _originTile.Y * 0.5f;
+
+		_renderer.AnimPaused = true;
+
+		auto& resolver = ContentResolver::Get();
+		if (!resolver.IsHeadless()) {
+			if (_currentAnimation != nullptr) {
+				_currentAnimation->Base->TextureDiffuse->SetWrap(SamplerWrapping::Repeat);
+			}
+
+			for (std::int32_t i = 0; i < ChunkCount; i++) {
+				_chunks[i] = std::make_unique<RenderCommand>(RenderCommand::Type::Sprite);
+				_chunks[i]->GetMaterial().SetShaderProgramType(Material::ShaderProgramType::Sprite);
+				_chunks[i]->GetMaterial().SetBlendingEnabled(true);
+				_chunks[i]->GetMaterial().ReserveUniformsDataMemory();
+				_chunks[i]->GetGeometry().SetDrawParameters(GL_TRIANGLE_STRIP, 0, 4);
+				_chunks[i]->GetMaterial().SetBlendingFactors(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+				auto* textureUniform = _chunks[i]->GetMaterial().Uniform(Material::TextureUniformName);
+				if (textureUniform && textureUniform->GetIntValue(0) != 0) {
+					textureUniform->SetIntValue(0); // GL_TEXTURE0
+				}
+			}
+		}
+
+		async_return true;
+	}
+
+	void SwingingVine::OnUpdate(float timeMult)
+	{
+		ActorBase::OnUpdate(timeMult);
+
+		float currentPhase = _phase + 0.04f * _levelHandler->GetElapsedFrames();
+		for (std::int32_t i = 0; i < ChunkCount; i++) {
+			_angle = sinf(currentPhase - i * (0.64f / ChunkCount)) * 1.2f + fPiOver2;
+
+			float distance = ChunkSize * powf(i, 0.95f);
+			_chunkPos[i].X = _pos.X + cosf(_angle) * distance;
+			_chunkPos[i].Y = _pos.Y + sinf(_angle) * distance;
+		}
+
+		auto& lastChunk = _chunkPos[ChunkCount - 1];
+		AABBInner = AABBf(lastChunk.X - 10.0f, lastChunk.Y - 10.0f, lastChunk.X + 10.0f, lastChunk.Y + 10.0f);
+
+		auto players = _levelHandler->GetPlayers();
+		for (auto* player : players) {
+			if (player->GetCarryingObject() == this) {
+				float chunkAngle = sinf(currentPhase - ChunkCount * 0.08f) * 0.6f;
+				Vector2f prevPos = player->GetPos();
+				Vector2 newPos = lastChunk + Vector2(chunkAngle * -22.0f, 20.0f + std::abs(chunkAngle) * -10.0f);
+				player->MoveInstantly(newPos, MoveType::Absolute);
+
+				if (_justTurned) {
+					// TODO: `SwingingVine::OnUpdate()` is called after `Player::OnUpdate()`, so this must be called one frame later
+					player->SetFacingLeft(!player->IsFacingLeft());
+					_justTurned = false;
+				} else if (player->IsFacingLeft()) {
+					if (newPos.X > prevPos.X) {
+						player->_renderer.AnimTime = 0.0f;
+						_justTurned = true;
+					}
+				} else {
+					if (newPos.X < prevPos.X) {
+						player->_renderer.AnimTime = 0.0f;
+						_justTurned = true;
+					}
+				}
+
+				player->_renderer.setRotation(chunkAngle);
+			}
+		}
+
+		SetState(ActorState::IsDirty, true);
+	}
+
+	void SwingingVine::OnUpdateHitbox()
+	{
+	}
+
+	bool SwingingVine::OnDraw(RenderQueue& renderQueue)
+	{
+		if (_currentAnimation != nullptr) {
+			auto& resBase = _currentAnimation->Base;
+			Vector2i texSize = resBase->TextureDiffuse->GetSize();
+			float currentPhase = _phase + 0.04f * _levelHandler->GetElapsedFrames();
+			auto& resolver = ContentResolver::Get();
+			bool indexed = ((resBase->Flags & GenericGraphicResourceFlags::Indexed) == GenericGraphicResourceFlags::Indexed);
+
+			for (std::int32_t i = 0; i < ChunkCount; i++) {
+				auto command = _chunks[i].get();
+				resolver.ConfigureSpriteShader(*command, indexed);
+
+				float chunkTexSize = ChunkSize / texSize.Y;
+				float chunkAngle = sinf(currentPhase - i * 0.08f) * 1.2f;
+
+				// The vine is longer than its texture, so the raw bias runs past V=1.0 and relies on wrapping.
+				// That can't be counted on, because the texture is padded to power-of-two dimensions and wrapping
+				// happens against the padded size, which would sample the transparent padding below the content.
+				// Wrap the bias here instead, so every chunk stays inside the real content.
+				float chunkTexBias = fmodf(chunkTexSize * i, 1.0f);
+				if (chunkTexBias + chunkTexSize > 1.0f) {
+					// The chunk straddling the seam can't be expressed as a single quad, so pin it to the last
+					// full chunk of content to draw valid pixels instead of padding
+					chunkTexBias = 1.0f - chunkTexSize;
+				}
+
+				auto instanceBlock = command->GetMaterial().UniformBlock(Material::InstanceBlockName);
+				instanceBlock->GetUniform(Material::TexRectUniformName)->SetFloatValue(1.0f, 0.0f, chunkTexSize, chunkTexBias);
+				instanceBlock->GetUniform(Material::SpriteSizeUniformName)->SetFloatValue(texSize.X, ChunkSize);
+				instanceBlock->GetUniform(Material::ColorUniformName)->SetFloatVector(Colorf::White.Data());
+				command->SetPspSpriteData(Colorf::White.Data(), 1.0f, 0.0f, chunkTexSize, chunkTexBias,
+					(float)texSize.X, ChunkSize, indexed ? (float)_currentAnimation->PaletteOffset : 0.0f);
+				command->GetGeometry().SetDrawParameters(GL_TRIANGLE_STRIP, 0, 4);
+
+				Matrix4x4f worldMatrix = Matrix4x4f::Translation(_chunkPos[i].X - texSize.X / 2, _chunkPos[i].Y - ChunkSize / 2, 0.0f);
+				worldMatrix.RotateZ(chunkAngle);
+				command->SetTransformation(worldMatrix);
+				command->SetLayer(_renderer.layer());
+				resolver.BindSpritePalette(*command, *instanceBlock, *resBase->TextureDiffuse, indexed, _currentAnimation->PaletteOffset);
+
+				renderQueue.AddCommand(command);
+			}
+		}
+
+		return true;
+	}
+
+	bool SwingingVine::OnHandleCollision(ActorBase* other)
+	{
+		if (auto* player = runtime_cast<Player>(other)) {
+			if (player->_springCooldown <= 0.0f) {
+				player->UpdateCarryingObject(this, SuspendType::SwingingVine);
+			}
+			return true;
+		}
+
+		return false;
+	}
+
+	void SwingingVine::Preload(const ActorActivationDetails& details)
+	{
+		PreloadMetadataAsync("Object/SwingingVine"_s);
+	}
+}

@@ -1,0 +1,317 @@
+﻿#pragma once
+
+#if defined(WITH_MULTIPLAYER) || defined(DOXYGEN_GENERATING_OUTPUT)
+
+#include "MpGameMode.h"
+#include "../LevelInitialization.h"
+#include "../PreferencesCache.h"
+
+#include "../../nCine/Base/HashMap.h"
+
+#include <Containers/SmallVector.h>
+
+using namespace Death::Containers;
+using namespace nCine;
+
+namespace Jazz2::Multiplayer
+{
+	/**
+		@brief Playlist entry in @ref ServerConfiguration
+		
+		Describes a single round in a server's rotation: the level to play and its game mode along with the
+		per-round rules (health, time limits, win conditions and similar). Unspecified fields inherit their
+		values from the root @ref ServerConfiguration.
+	*/
+	struct PlaylistEntry
+	{
+		/** @brief Level name in `<episode>/<level>` format */
+		String LevelName;
+		/** @brief Game mode */
+		MpGameMode GameMode;
+
+		/** @brief Whether reforged gameplay is enabled */
+		bool ReforgedGameplay;
+		/** @brief Number of teams in team game modes (2-4, ignored in non-team modes) */
+		std::uint8_t TeamCount;
+		/** @brief Whether teams are automatically rebalanced when they become uneven */
+		bool AutoBalanceTeams;
+		/** @brief Whether players are allowed to pick/change their own team */
+		bool AllowTeamSelection;
+		/** @brief Whether players on the same team can damage each other */
+		bool FriendlyFire;
+		/** @brief Whether every player has limited number of lives, the game ends when only one player remains */
+		bool Elimination;
+		/** @brief Initial player health, default is unlimited for Race and Treasure Hunt, otherwise 5 */
+		std::int32_t InitialPlayerHealth;
+		/** @brief Maximum number of seconds for a game */
+		std::uint32_t MaxGameTimeSecs;
+		/** @brief Duration of pre-game before starting a round */
+		std::uint32_t PreGameSecs;
+		/** @brief Duration of invulnerability after (re)spawning */
+		std::uint32_t SpawnInvulnerableSecs;
+		/** @brief Total number of kills, default is 10 (Battle) */
+		std::uint32_t TotalKills;
+		/** @brief Total number of laps, default is 3 (Race) */
+		std::uint32_t TotalLaps;
+		/** @brief Total number of treasure to collect to win (Treasure Hunt); default is 0, which auto-weights the target from the level's treasure */
+		std::uint32_t TotalTreasureCollected;
+		/** @brief Duration of overtime in seconds after first player finishes (Race only) */
+		std::uint32_t OvertimeSecs;
+		/** @brief Whether players can stand on top of each other; if disabled, they bump apart on every axis */
+		bool PlayerStacking;
+		/** @brief Whether the race minimap is available to clients (Race only) */
+		bool AllowMinimap;
+		/** @brief Whether players are recolored to their team color in team modes (forces the primary fur section, ignored in non-team modes) */
+		bool ColorizePlayersByTeam;
+	};
+
+	/**
+		@brief Server configuration
+		
+		This structure contains the server configuration, which is usually loaded from a file and partially also transferred to connected clients.
+
+		@section Multiplayer-ServerConfiguration-format File format description
+
+		The server configuration is read from a JSON file, which may contain the following fields:
+		-   @cpp "$include" @ce : @m_span{m-label m-danger m-flat} string @m_endspan Include configuration from another file by path
+			-   If the JSON contains a @cpp "$include" @ce directive, it will load the referenced files recursively, but only once to avoid infinite loops
+		-   @cpp "ServerName" @ce : @m_span{m-label m-danger m-flat} string @m_endspan Name of the server
+		-   @cpp "ServerAddressOverride" @ce : @m_span{m-label m-danger m-flat} string @m_endspan Address override allows to specify an alternate address
+			-   The address is used only in the public list to be able to connect to the server from the outside
+			-   IPv4 address, IPv6 address or domain name can be used
+			-   It is also possible to specify a different port if it is different from the local port
+		-   @cpp "ServerPassword" @ce : @m_span{m-label m-danger m-flat} string @m_endspan Password to join the server
+		-   @cpp "WelcomeMessage" @ce : @m_span{m-label m-danger m-flat} string @m_endspan Message displayed to players upon joining
+		-   @cpp "MaxPlayerCount" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Maximum number of players allowed to join
+		-   @cpp "MinPlayerCount" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Minimum number of players required to start a round
+		-   @cpp "ServerPort" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan UDP port number on which the server runs
+		-   @cpp "WsPort" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan WebSocket port number on which server runs
+			-   If specified, the server will also listen on this port for WebSocket connections, which can be used by web browsers and other clients that don't support UDP
+			-   WebSocket connections have a higher latency and lower performance than UDP, but can be used for better compatibility
+		-   @cpp "WsCertPath" @ce : @m_span{m-label m-danger m-flat} string @m_endspan Path to TLS certificate for WebSocket server
+		-   @cpp "WsKeyPath" @ce : @m_span{m-label m-danger m-flat} string @m_endspan Path to TLS private key for WebSocket server
+			-   If specified, the WebSocket server will use secure connections (wss://) and require clients to support TLS
+		-   @cpp "IsPrivate" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether the server is private and hidden in the server list (default is **false**)
+		-   @cpp "AllowAssetStreaming" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether clients are allowed to download assets from the server (default is **true**)
+		-   @cpp "RequiresDiscordAuth" @ce : @m_span{m-label m-default m-flat} bool @m_endspan If `true`, the server requires Discord authentication (default is **false**)
+			-   Discord authentication requires a running Discord client
+			-   Supported platforms are Linux, macOS and Windows, players from other platforms won't be able to join
+		-   @cpp "AllowedPlayerTypes" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Bitmask for allowed player types (@cpp 1 @ce - Jazz, @cpp 2 @ce - Spaz, @cpp 4 @ce - Lori)
+		-   @cpp "IdleKickTimeSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Time in seconds after idle players are kicked (default is **never**)
+		-   @cpp "ReconnectWindowSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Time window in seconds during which a disconnected player can reconnect and resume their progression (weapons, lives, score, gems), @cpp 0 @ce or less to disable (default is **300**, i.e. 5 minutes)
+		-   @cpp "AdminUniquePlayerIDs" @ce : @m_span{m-label m-primary m-flat} object @m_endspan Map of admin player IDs
+			-   Key specifies player ID, value contains privileges
+		-   @cpp "WhitelistedUniquePlayerIDs" @ce : @m_span{m-label m-primary m-flat} object @m_endspan Map of whitelisted player IDs
+			-   Key specifies player ID, value can contain a user-defined comment
+			-   If at least one entry is specified, only whitelisted players can join the server
+		-   @cpp "BannedUniquePlayerIDs" @ce : @m_span{m-label m-primary m-flat} object @m_endspan Map of banned player IDs
+			-   Key specifies player ID, value can contain a user-defined comment (e.g., reason)
+		-   @cpp "BannedIPAddresses" @ce : @m_span{m-label m-primary m-flat} object @m_endspan Map of banned IP addresses
+			-   Key specifies IP address, value can contain a user-defined comment (e.g., reason)
+		-   @cpp "ReforgedGameplay" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether reforged gameplay is enabled
+			-   Has a higher priority than settings of the player
+		-   @cpp "RandomizePlaylist" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether to play the playlist in random order
+			-   If enabled, the list is shuffled when the server is started and when the end of the list is reached
+		-   @cpp "TotalPlayerPoints" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Total points to win the championship, @cpp 0 @ce to disable (default is **50**)
+			-   Player can score a maximum of 20 points per round
+		-   @cpp "GameMode" @ce : @m_span{m-label m-danger m-flat} string @m_endspan Game mode
+			-   @cpp "b" @ce / @cpp "battle" @ce - Battle
+			-   @cpp "tb" @ce / @cpp "teambattle" @ce - Team Battle
+			-   @cpp "r" @ce / @cpp "race" @ce - Race
+			-   @cpp "tr" @ce / @cpp "teamrace" @ce - Team Race
+			-   @cpp "th" @ce / @cpp "treasurehunt" @ce - Treasure Hunt
+			-   @cpp "tth" @ce / @cpp "teamtreasurehunt" @ce - Team Treasure Hunt
+			-   @cpp "ctf" @ce / @cpp "capturetheflag" @ce - Capture The Flag
+			-   @cpp "c" @ce / @cpp "coop" @ce / @cpp "cooperation" @ce - Cooperation
+		-   @cpp "TeamCount" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Number of teams in team game modes, clamped to 2-4 (default is **2**)
+		-   @cpp "AutoBalanceTeams" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether teams are automatically rebalanced when they become uneven (default is **true**)
+		-   @cpp "MaxTeamSizeDiff" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Allowed player-count difference between the largest and smallest team before rebalancing (default is **1**)
+		-   @cpp "AllowTeamSelection" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether players may pick/change their own team (default is **true**)
+		-   @cpp "FriendlyFire" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether players on the same team can damage each other (default is **false**)
+		-   @cpp "AllowMinimap" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether the race minimap is available to clients (Race only) (default is **true**)
+		-   @cpp "ColorizePlayersByTeam" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether players are recolored to their team color in team modes, forcing the first 2 character color sections (default is **true**)
+		-   @cpp "Elimination" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether elimination mode is enabled
+			-   If enabled, a player has a limited number of lives given by @cpp "TotalKills" @ce property
+			-   Game ends when only one player remains, or when the conditions of the specified game mode are met
+			-   Elimination can be combined with any game mode
+		-   @cpp "InitialPlayerHealth" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Initial health of players
+			-   If the property is not specified or is less than 1, the player's health is automatically assigned depending on the game mode
+			-   Default value for Race and Treasure Hunt is **unlimited**, in all other game modes it's **5**
+		-   @cpp "MaxGameTimeSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Maximum allowed game time in seconds per level (default is **unlimited**)
+		-   @cpp "PreGameSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Pre-game duration in seconds (default is **30** seconds)
+			-   Pre-game is skipped in Cooperation
+		-   @cpp "SpawnInvulnerableSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Duration of invulnerability after (re)spawning (default is **4** seconds)
+			-   Invulnerability is skipped in Cooperation
+		-   @cpp "TotalKills" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Number of kills required to win (Battle)
+		-   @cpp "TotalLaps" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Number of laps required to win (Race)
+		-   @cpp "TotalTreasureCollected" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Amount of treasure required to win (Treasure Hunt)
+		-   @cpp "OvertimeSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Overtime duration in seconds (Race)
+		-   @cpp "EnableSpectate" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether spectate mode is enabled (default is **true**)
+		-   @cpp "PlayerStacking" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether players can stand on top of each other (and jump off); if disabled, they bump apart on every axis as before (default is **true**)
+		-   @cpp "EnableFreeCamera" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether free camera is enabled in spectate mode (default is **true**)
+		-   @cpp "AllowJoinDuringRound" @ce : @m_span{m-label m-default m-flat} bool @m_endspan  Whether players can join in the middle of a round (default is **true**)
+		-   @cpp "JoinCooldownSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Cooldown duration in seconds for players who join mid-round (default is **0** seconds)
+			-   Players cannot move or shoot during this cooldown, but other players can hit them
+		-   @cpp "Playlist" @ce : @m_span{m-label m-success m-flat} array @m_endspan List of game configurations per round, each entry may contain:
+			-   @cpp "LevelName" @ce : @m_span{m-label m-danger m-flat} string @m_endspan Name of the level in `<episode>/<level>` format
+			-   @cpp "GameMode" @ce : @m_span{m-label m-danger m-flat} string @m_endspan Specific game mode for this round
+			-   @cpp "Elimination" @ce : @m_span{m-label m-default m-flat} bool @m_endspan Whether elimination mode is enabled for this round
+			-   @cpp "InitialPlayerHealth" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Initial health of players for this round
+			-   @cpp "MaxGameTimeSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Maximum game duration for this round
+			-   @cpp "PreGameSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Pre-game duration before this round starts
+			-   @cpp "SpawnInvulnerableSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Duration of invulnerability after (re)spawning
+			-   @cpp "TotalKills" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Number of kills required to win this round (Battle)
+			-   @cpp "TotalLaps" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Number of laps required to win this round (Race)
+			-   @cpp "TotalTreasureCollected" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Amount of treasure required to win this round (Treasure Hunt)
+			-   @cpp "OvertimeSecs" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Overtime duration in seconds (Race)
+		-   @cpp "PlaylistIndex" @ce : @m_span{m-label m-warning m-flat} integer @m_endspan Index of the current playlist entry
+		
+		If a property is missing in a playlist entry, it will inherit the value from the root configuration.
+		If a property is missing in the root configuration, the default value is used. `{PlayerName}` and
+		`{ServerName}` variables can be used in @cpp "ServerName" @ce and @cpp "WelcomeMessage" @ce properties.
+		Both properties also support @ref Jazz2-UI-Font-format "text formatting" using the @cpp "\f[…]" @ce notation.
+		
+		@subsection Multiplayer-ServerConfiguration-format-example Example server configuration
+		
+		@include ServerConfiguration.json
+	*/
+	struct ServerConfiguration
+	{
+		/** @{ @name Server settings */
+
+		/** @brief Server name */
+		String ServerName;
+		/** @brief Server address override allows to specify an alternate address under which the server will be listed */
+		String ServerAddressOverride;
+		/** @brief Password of the server */
+		String ServerPassword;
+		/** @brief Welcome message displayed to players upon joining */
+		String WelcomeMessage;
+		/** @brief Maximum number of players allowed to join */
+		std::uint32_t MaxPlayerCount;
+		/** @brief Minimum number of players to start a round */
+		std::uint32_t MinPlayerCount;
+		/** @brief Game mode */
+		MpGameMode GameMode;
+		/** @brief Server port */
+		std::uint16_t ServerPort;
+#if defined(WITH_WEBSOCKET) || defined(DOXYGEN_GENERATING_OUTPUT)
+		/** @brief WebSocket server port (0 = disabled) */
+		std::uint16_t WsPort;
+		/** @brief Path to the TLS certificate file for secure WebSocket (WSS), empty = insecure WS */
+		String WsCertPath;
+		/** @brief Path to the TLS private key file for secure WebSocket (WSS) */
+		String WsKeyPath;
+#endif
+		/** @brief Whether the server is private (i.e. not visible in the server list) */
+		bool IsPrivate;
+		/** @brief Whether clients are allowed to automatically download missing assets from the server */
+		bool AllowAssetStreaming;
+		/** @brief Whether Discord authentication is required to join the server */
+		bool RequiresDiscordAuth;
+		/** @brief Allowed player types as bitmask of @ref PlayerType */
+		std::uint8_t AllowedPlayerTypes;
+		/** @brief Time after which inactive players will be kicked, in seconds, -1 to disable */
+		std::int32_t IdleKickTimeSecs;
+		/** @brief Time window in seconds during which a disconnected player can reconnect and resume their progression, 0 or less to disable */
+		std::int32_t ReconnectWindowSecs;
+		/** @brief List of unique player IDs with admin rights, value contains list of privileges, or `*` for all privileges */
+		HashMap<String, String> AdminUniquePlayerIDs;
+		/** @brief List of whitelisted unique player IDs, value can contain user-defined comment */
+		HashMap<String, String> WhitelistedUniquePlayerIDs;
+		/** @brief List of banned unique player IDs, value can contain user-defined reason */
+		HashMap<String, String> BannedUniquePlayerIDs;
+		/** @brief List of banned IP addresses, value can contain user-defined reason */
+		HashMap<String, String> BannedIPAddresses;
+
+		/** @} */
+
+		/** @{ @name Game-specific settings */
+
+		/** @brief Whether reforged gameplay is enabled, see @ref PreferencesCache::EnableReforgedGameplay */
+		bool ReforgedGameplay;
+		/** @brief Number of teams in team game modes (2-4, ignored in non-team modes) */
+		std::uint8_t TeamCount;
+		/** @brief Whether teams are automatically rebalanced when they become uneven */
+		bool AutoBalanceTeams;
+		/** @brief Maximum allowed difference in player count between the largest and smallest team before rebalancing */
+		std::uint8_t MaxTeamSizeDiff;
+		/** @brief Whether players are allowed to pick/change their own team */
+		bool AllowTeamSelection;
+		/** @brief Whether players on the same team can damage each other */
+		bool FriendlyFire;
+		/** @brief Whether to play the playlist in random order */
+		bool RandomizePlaylist;
+		/** @brief Whether the race minimap is available to clients (Race only) */
+		bool AllowMinimap;
+		/** @brief Whether players are recolored to their team color in team modes (forces the primary fur section, ignored in non-team modes) */
+		bool ColorizePlayersByTeam;
+		/** @brief Whether every player has limited number of lives, the game ends when only one player remains */
+		bool Elimination;
+		/** @brief Total player points to win the championship */
+		std::uint32_t TotalPlayerPoints;
+		/** @brief Initial player health, default is unlimited for Race and Treasure Hunt, otherwise 5 */
+		std::int32_t InitialPlayerHealth;
+		/** @brief Maximum number of seconds for a game */
+		std::uint32_t MaxGameTimeSecs;
+		/** @brief Duration of pre-game before starting a round */
+		std::uint32_t PreGameSecs;
+		/** @brief Duration of invulnerability after (re)spawning */
+		std::uint32_t SpawnInvulnerableSecs;
+		/** @brief Total number of kills, default is 10 (Battle) */
+		std::uint32_t TotalKills;
+		/** @brief Total number of laps, default is 3 (Race) */
+		std::uint32_t TotalLaps;
+		/** @brief Total number of treasure collected, default is 0 for automatic calculation (Treasure Hunt) */
+		std::uint32_t TotalTreasureCollected;
+		/** @brief Duration of overtime in seconds after first player finishes (Race only) */
+		std::uint32_t OvertimeSecs;
+
+		/** @brief Whether spectate mode is enabled */
+		bool EnableSpectate;
+		/** @brief Whether players can stand on top of each other; if disabled, they bump apart on every axis */
+		bool PlayerStacking;
+		/** @brief Whether free camera is enabled in spectate mode */
+		bool EnableFreeCamera;
+		/** @brief Whether players can join in the middle of a round */
+		bool AllowJoinDuringRound;
+		/** @brief Cooldown duration in seconds for players who join mid-round */
+		std::uint32_t JoinCooldownSecs;
+
+		/** @brief Index of the current playlist entry */
+		std::int32_t PlaylistIndex;
+		/** @brief Playlist */
+		SmallVector<PlaylistEntry, 0> Playlist;
+
+		/** @} */
+
+		/** @{ @name Pure runtime information */
+
+		/** @brief Path to the configuration file */
+		String FilePath;
+
+		/** @brief Server unique identifier */
+		Uuid UniqueServerID;
+
+		/** @brief Start time of the server as Unix timestamp */
+		std::uint64_t StartUnixTimestamp;
+
+		/** @} */
+	};
+
+	/**
+		@brief Server initialization parameters
+		
+		Bundles everything needed to start a server: the @ref ServerConfiguration describing its settings and
+		rules, together with the @ref LevelInitialization parameters for the level it should first load.
+	*/
+	struct ServerInitialization
+	{
+		/** @brief Server configuration */
+		ServerConfiguration Configuration;
+		/** @brief Level initialization parameters */
+		LevelInitialization InitialLevel;
+	};
+}
+
+#endif
