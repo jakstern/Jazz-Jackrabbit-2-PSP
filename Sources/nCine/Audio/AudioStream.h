@@ -5,6 +5,7 @@
 #include <memory>
 
 #include <Containers/SmallVector.h>
+#include <Containers/String.h>
 #include <Containers/StringView.h>
 #include <IO/Stream.h>
 
@@ -122,6 +123,7 @@ namespace nCine
 
 #if defined(DEATH_TARGET_PSP)
 		std::unique_ptr<Death::IO::Stream> pspFile_;
+		String pspFilename_;
 		std::unique_ptr<unsigned char[]> pspBlock_;
 		std::unique_ptr<std::int16_t[]> pspDecoded_;
 		std::int32_t pspDataOffset_;
@@ -132,11 +134,19 @@ namespace nCine
 		std::int32_t pspSourceSamplesRemaining_;
 		std::int32_t pspDecodedFrames_;
 		std::int32_t pspDecodedCursor_;
+		std::int64_t pspResumeFileOffset_;
 		bool pspDecodeFailed_;
+		bool pspReopenPending_;
+		AudioStream* pspNextStream_;
+		static AudioStream* pspStreamsHead_;
 
 		std::int32_t decodePspFrames(std::int16_t* destination, std::int32_t frames, bool looping);
 		bool decodePspBlock();
 		bool rewindPsp();
+		void registerPspStream();
+		void unregisterPspStream();
+		void suspendPspStream();
+		bool resumePspStream();
 #endif
 
 		// Private constructors called only by AudioStreamPlayer

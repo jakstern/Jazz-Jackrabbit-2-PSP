@@ -41,8 +41,8 @@ namespace nCine
 		fd_ = sceIoOpen(absPath, PSP_O_RDONLY, 0777);
 		if (fd_ < 0) { fd_ = -1; return; }
 
-		for (Slot& s : slots_) { s.State = Free; s.Dst = nullptr; s.Offset = s.Size = 0; }
-
+		// Do not reset slots here on a restart. Stop() turns interrupted reads into DoneFail, and live textures
+		// still hold those generation-tagged handles; they must observe failure and Release() them after resume.
 		mutex_ = sceKernelCreateSema("Jazz2TexStreamMutex", 0, 1, 1, nullptr);
 		wake_ = sceKernelCreateSema("Jazz2TexStreamWake", 0, 0, SlotCount + 8, nullptr);
 		if (mutex_ < 0 || wake_ < 0) goto fail;

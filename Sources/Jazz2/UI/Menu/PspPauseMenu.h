@@ -26,7 +26,7 @@ namespace Jazz2::UI::Menu
 			  _godEnabled(godEnabled), _shieldType(shieldType), _menuMeta(menuMeta), _sounds(sounds)
 		{
 			SceCtrlData pad{};
-			sceCtrlPeekBufferPositive(&pad, 1);
+			if (sceCtrlPeekBufferPositive(&pad, 1) <= 0) pad.Buttons = 0;
 			_last = pad.Buttons;
 		}
 
@@ -47,7 +47,13 @@ namespace Jazz2::UI::Menu
 			_onlineSession = allowed;
 			_row = std::min(_row, ItemCount() - 1);
 		}
-		void LatchInput() { SceCtrlData pad{}; sceCtrlPeekBufferPositive(&pad, 1); _last = pad.Buttons; _waitForRelease = true; }
+		void LatchInput()
+		{
+			SceCtrlData pad{};
+			if (sceCtrlPeekBufferPositive(&pad, 1) <= 0) pad.Buttons = 0;
+			_last = pad.Buttons;
+			_waitForRelease = true;
+		}
 
 		bool OnDraw(nCine::RenderQueue& renderQueue) override
 		{
@@ -85,7 +91,9 @@ namespace Jazz2::UI::Menu
 			if (!isUpdateEnabled()) return;
 			Jazz2::UI::Canvas::OnUpdate(timeMult);
 			SceCtrlData pad{};
-			sceCtrlReadBufferPositive(&pad, 1);
+			pad.Lx = 128;
+			pad.Ly = 128;
+			if (sceCtrlReadBufferPositive(&pad, 1) <= 0) pad.Buttons = _last;
 			std::uint32_t now = pad.Buttons;
 			if (pad.Ly < 64) now |= PSP_CTRL_UP; else if (pad.Ly > 192) now |= PSP_CTRL_DOWN;
 			if (pad.Lx < 64) now |= PSP_CTRL_LEFT; else if (pad.Lx > 192) now |= PSP_CTRL_RIGHT;

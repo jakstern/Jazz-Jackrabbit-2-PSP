@@ -60,7 +60,7 @@ namespace Jazz2::UI::Menu
 		explicit PspMenu(PspSavedataManager* savedata, nCine::PspAdhoc& adhoc) : _savedata(savedata), _adhoc(adhoc)
 		{
 			SceCtrlData pad{};
-			sceCtrlPeekBufferPositive(&pad, 1);
+			if (sceCtrlPeekBufferPositive(&pad, 1) <= 0) pad.Buttons = 0;
 			_last = pad.Buttons; // Do not carry a held gameplay/transition button into a fresh menu.
 			LoadSystemNickname();
 			_playerFurColor = PreferencesCache::PlayerFurColor;
@@ -89,7 +89,13 @@ namespace Jazz2::UI::Menu
 		void ClearStorageAction() { _storageAction = StorageAction::None; }
 		bool RegenerateCacheRequested() const { return _regenerateCacheRequested; }
 		void ClearRegenerateCacheRequest() { _regenerateCacheRequested = false; }
-		void LatchInput() { SceCtrlData pad{}; sceCtrlPeekBufferPositive(&pad, 1); _last = pad.Buttons; _waitForRelease = true; }
+		void LatchInput()
+		{
+			SceCtrlData pad{};
+			if (sceCtrlPeekBufferPositive(&pad, 1) <= 0) pad.Buttons = 0;
+			_last = pad.Buttons;
+			_waitForRelease = true;
+		}
 		void ShowStorageResult(const char* message)
 		{
 			std::snprintf(_message, sizeof(_message), "%s", message);
@@ -405,8 +411,10 @@ namespace Jazz2::UI::Menu
 					_partyRetryFrames = 0.0f;
 				}
 			}
-			SceCtrlData pad;
-			sceCtrlReadBufferPositive(&pad, 1);
+			SceCtrlData pad{};
+			pad.Lx = 128;
+			pad.Ly = 128;
+			if (sceCtrlReadBufferPositive(&pad, 1) <= 0) pad.Buttons = _last;
 			std::uint32_t now = pad.Buttons;
 			if (pad.Ly < 64) now |= PSP_CTRL_UP; else if (pad.Ly > 192) now |= PSP_CTRL_DOWN;
 			if (pad.Lx < 64) now |= PSP_CTRL_LEFT; else if (pad.Lx > 192) now |= PSP_CTRL_RIGHT;

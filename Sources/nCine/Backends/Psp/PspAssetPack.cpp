@@ -25,6 +25,8 @@ namespace nCine
 		pages_ = nullptr;
 		header_ = {};
 		triedLoad_ = false;
+		reopenAfterResume_ = false;
+		path_[0] = '\0';
 	}
 
 	bool PspAssetPack::IsCompatibleOnDisk(const char* cachePath)
@@ -44,9 +46,8 @@ namespace nCine
 		if (triedLoad_) return file_ != nullptr;
 		triedLoad_ = true;
 
-		char path[512];
-		std::snprintf(path, sizeof(path), "%s/texture.pak", cachePath);
-		std::FILE* f = std::fopen(path, "rb");
+		std::snprintf(path_, sizeof(path_), "%s/texture.pak", cachePath);
+		std::FILE* f = std::fopen(path_, "rb");
 		if (f == nullptr) return false;
 
 		PspGpu::PackHeader h {};
@@ -81,8 +82,42 @@ namespace nCine
 		pages_ = pages;
 		// PSP-2000/3000 keep textures eager-resident; only the PSP-1000 needs reads off the render thread.
 		if (PspIsLowMemoryModel()) {
-			PspTextureStreamer::Get().Start(path);
+			PspTextureStreamer::Get().Start(path_);
 		}
+		return true;
+	}
+
+	void PspAssetPack::Suspend()
+	{
+		if (reopenAfterResume_) return;
+		reopenAfterResume_ = (file_ != nullptr);
+		if (!reopenAfterResume_) return;
+
+		// Stop first: its raw descriptor and PspAssetPack's FILE refer to the same Memory Stick file but are
+		// independently positioned and may both be inside an I/O call.
+		PspTextureStreamer::Get().Stop();
+		std::fclose(file_);
+		file_ = nullptr;
+	}
+
+	bool PspAssetPack::Resume()
+	{
+		if (!reopenAfterResume_) return true;
+		if (path_[0] == '\0') return false;
+
+		std::FILE* reopened = std::fopen(path_, "rb");
+		if (reopened == nullptr) return false;
+		PspGpu::PackHeader reopenedHeader{};
+		if (std::fread(&reopenedHeader, sizeof(reopenedHeader), 1, reopened) != 1 ||
+			reopenedHeader.magic != header_.magic || reopenedHeader.version != header_.version ||
+			reopenedHeader.entryCount != header_.entryCount || reopenedHeader.entriesOffset != header_.entriesOffset ||
+			reopenedHeader.blobOffset != header_.blobOffset || reopenedHeader.blobSize != header_.blobSize) {
+			std::fclose(reopened);
+			return false;
+		}
+		file_ = reopened;
+		if (PspIsLowMemoryModel()) PspTextureStreamer::Get().Start(path_);
+		reopenAfterResume_ = false;
 		return true;
 	}
 

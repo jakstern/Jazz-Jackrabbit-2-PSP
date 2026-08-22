@@ -23,6 +23,10 @@ namespace nCine
 
 		// Open the pack and read its tables; loads once, returns whether a valid pack is open.
 		bool EnsureLoaded(const char* cachePath);
+		// Close device-backed handles before standby and reopen them afterwards without discarding the tables
+		// referenced by live textures. Resume remains retryable if Memory Stick access is not ready yet.
+		void Suspend();
+		bool Resume();
 		bool IsLoaded() const { return file_ != nullptr; }
 
 		// Find a baked texture by asset-name hash, or nullptr.
@@ -50,6 +54,8 @@ namespace nCine
 	private:
 		std::FILE* file_ = nullptr;
 		bool triedLoad_ = false;
+		bool reopenAfterResume_ = false;
+		char path_[512]{};
 		PspGpu::PackHeader header_ {};
 		PspGpu::TexEntry* entries_ = nullptr;
 		PspGpu::TexPage* pages_ = nullptr;

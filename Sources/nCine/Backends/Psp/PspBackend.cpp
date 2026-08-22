@@ -9,6 +9,9 @@
 #include "nCine/Input/IInputManager.h"
 #include "nCine/ServiceLocator.h"
 
+#include <pspctrl.h>
+#include <psppower.h>
+
 #include <memory>
 
 namespace nCine
@@ -29,8 +32,30 @@ namespace nCine
 		}
 
 		void Frame() { Step(); }
+		void PowerSuspend()
+		{
+			if (powerSuspended_) return;
+			PspGuSuspend();
+			Suspend();
+			powerSuspended_ = true;
+		}
+		void PowerResume()
+		{
+			if (!powerSuspended_) return;
+			// Clock and controller configuration are hardware state, not process memory; real units can return
+			// with firmware defaults after standby.
+			scePowerSetClockFrequency(333, 333, 166);
+			sceCtrlSetSamplingCycle(0);
+			sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
+			PspGuResume();
+			Resume();
+			powerSuspended_ = false;
+		}
 		void Shut() { ShutdownCommon(); }
 		bool WantsQuit() const { return shouldQuit_; }
+
+	private:
+		bool powerSuspended_ = false;
 	};
 
 	Application& theApplication()
@@ -48,6 +73,16 @@ namespace nCine
 	void PspStepEngine()
 	{
 		static_cast<PspApplication&>(theApplication()).Frame();
+	}
+
+	void PspSuspendEngine()
+	{
+		static_cast<PspApplication&>(theApplication()).PowerSuspend();
+	}
+
+	void PspResumeEngine()
+	{
+		static_cast<PspApplication&>(theApplication()).PowerResume();
 	}
 
 	bool PspEngineWantsQuit()

@@ -47,6 +47,7 @@ namespace nCine
 		bool g_pendingFrameComplete = false;
 		void (*g_systemUtilityUpdate)() = nullptr;
 		bool g_restoreAfterSystemUtility = false;
+		bool g_suspended = false;
 
 		// Ordered 4x4 Bayer dither: signed 4-bit offsets applied before the GE truncates to 5/6/5. Free in
 		// hardware, and what makes the 16-bit framebuffer viable for stacked alpha and fades.
@@ -112,6 +113,7 @@ namespace nCine
 
 	void PspGuWaitForPreviousFrame()
 	{
+		if (g_suspended) return;
 		// A list still being built has ALREADY been handed to the GE - sceGuStart(GU_DIRECT) enqueues it and
 		// pspsdk advances the stall address per draw - so the hardware may be reading vertices or texture
 		// memory out of it right now. Callers fence to make a free safe, so mid-list this must genuinely
@@ -133,6 +135,7 @@ namespace nCine
 
 	void PspGuPrepareFrame()
 	{
+		if (g_suspended) return;
 		if (!g_framePending) return;
 		if (!g_pendingFrameComplete) {
 			PspDiagnosticsBeginPhase(PspDiagnosticsPhase::GpuWait);
@@ -157,15 +160,50 @@ namespace nCine
 		g_restoreAfterSystemUtility = true;
 	}
 
+	void PspGuSuspend()
+	{
+		if (!g_initialized || g_suspended) return;
+
+		// The power callback is serviced between Step() calls, so normally only a submitted frame can be live.
+		// Still retire an open list defensively: the firmware must never suspend while the GE is consuming the
+		// display-list buffer that the CPU will reuse after wake.
+		if (g_listOpen) {
+			if (g_frameOpen) PspEmitFlushBatches();
+			sceGuFinish();
+			g_listOpen = false;
+			g_frameOpen = false;
+			g_framePending = true;
+		}
+		if (g_framePending && !g_pendingFrameComplete) {
+			sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+			g_pendingFrameComplete = true;
+		}
+		PspEmitInvalidateGuState();
+		g_suspended = true;
+	}
+
+	void PspGuResume()
+	{
+		if (!g_initialized || !g_suspended) return;
+		// A suspend is at least as destructive to persistent GE state as a Sony utility. The next game list
+		// reissues framebuffer, viewport, blend and dither state, while the emitter rebinds texture state.
+		PspEmitInvalidateGuState();
+		g_restoreAfterSystemUtility = true;
+		sceGuDisplay(GU_TRUE);
+		g_suspended = false;
+	}
+
 	void PspGuBeginFrame(std::uint32_t clearColor)
 	{
-		if (!g_initialized || g_frameOpen) return;
+		if (!g_initialized || g_suspended || g_frameOpen) return;
 		PspGuPrepareFrame();
 		sceGuStart(GU_DIRECT, g_displayList);
 		g_listOpen = true;
 		if (g_restoreAfterSystemUtility) {
 			// A visible system utility owns the GU and may change any persistent register, so re-establish
 			// everything the emitter assumes before taking game draws again.
+			sceGuDrawBuffer(FrameBufferFormat, reinterpret_cast<void*>(0), BufferWidth);
+			sceGuDispBuffer(ScreenWidth, ScreenHeight, reinterpret_cast<void*>(FrameBufferSize), BufferWidth);
 			sceGuOffset(2048 - ScreenWidth / 2, 2048 - ScreenHeight / 2);
 			sceGuViewport(2048, 2048, ScreenWidth, ScreenHeight);
 			sceGuScissor(0, 0, ScreenWidth, ScreenHeight);
@@ -186,7 +224,7 @@ namespace nCine
 
 	void PspGuEndFrame()
 	{
-		if (!g_frameOpen) return;
+		if (g_suspended || !g_frameOpen) return;
 		PspEmitFlushBatches();
 		sceGuFinish();
 		g_listOpen = false;

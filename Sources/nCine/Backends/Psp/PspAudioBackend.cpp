@@ -118,7 +118,8 @@ namespace nCine
 	{
 	public:
 		PspAudioDevice()
-			: channel_(-1), thread_(-1), mutex_(-1), running_(false), suspended_(false), gain_(1.0f),
+			: channel_(-1), thread_(-1), mutex_(-1), running_(false), suspended_(false), outputActive_(false),
+			  suspendDepth_(0), reopenChannelAfterResume_(false), gain_(1.0f),
 			  listenerPosition_(Vector3f::Zero)
 		{
 			for (Voice& voice : voices_) {
@@ -330,8 +331,56 @@ namespace nCine
 		}
 
 		std::int32_t nativeFrequency() override { return OutputFrequency; }
-		void suspendDevice() override { suspended_ = true; }
-		void resumeDevice() override { suspended_ = false; }
+		void suspendDevice() override
+		{
+			Lock();
+			++suspendDepth_;
+			if (suspendDepth_ == 1) {
+				suspended_ = true;
+				reopenChannelAfterResume_ = reopenChannelAfterResume_ || (channel_ >= 0);
+				for (AudioStream* stream = AudioStream::pspStreamsHead_; stream != nullptr; stream = stream->pspNextStream_)
+					stream->suspendPspStream();
+			}
+			Unlock();
+
+			// Mix() is protected by the semaphore above. The output call is deliberately outside it, so wait for
+			// that final hardware-owned buffer before releasing the channel or acknowledging suspend.
+			while (outputActive_) sceKernelDelayThread(1000);
+			if (suspendDepth_ == 1 && reopenChannelAfterResume_ && channel_ >= 0) {
+				sceAudioChRelease(channel_);
+				channel_ = -1;
+			}
+		}
+
+		void resumeDevice() override
+		{
+			Lock();
+			if (suspendDepth_ <= 0) {
+				Unlock();
+				return;
+			}
+			--suspendDepth_;
+			const bool finalResume = (suspendDepth_ == 0);
+			Unlock();
+			if (!finalResume) return;
+
+			bool restored = false;
+			for (int attempt = 0; attempt < 50; ++attempt) {
+				Lock();
+				bool streamsReady = true;
+				for (AudioStream* stream = AudioStream::pspStreamsHead_; stream != nullptr; stream = stream->pspNextStream_)
+					streamsReady = stream->resumePspStream() && streamsReady;
+				if (reopenChannelAfterResume_ && channel_ < 0)
+					channel_ = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, OutputFrames, PSP_AUDIO_FORMAT_STEREO);
+				const bool channelReady = (!reopenChannelAfterResume_ || channel_ >= 0);
+				restored = streamsReady && channelReady;
+				if (restored) suspended_ = false;
+				Unlock();
+				if (restored) break;
+				sceKernelDelayThread(10000);
+			}
+			if (!restored) LOGE("PSP audio resources did not recover after standby");
+		}
 
 		void StartSource(std::uint32_t source)
 		{
@@ -390,8 +439,17 @@ namespace nCine
 			alignas(64) std::int16_t output[2][OutputFrames * 2];
 			std::uint32_t bufferIndex = 0;
 			while (running_) {
+				if (suspended_) {
+					sceKernelDelayThread(10000);
+					continue;
+				}
 				Mix(output[bufferIndex]);
-				const int result = sceAudioOutputBlocking(channel_, PSP_AUDIO_VOLUME_MAX, output[bufferIndex]);
+				// Set the marker before the final suspend check. This closes both races: suspend either observes an
+				// active output and waits for it, or the output thread observes suspended_ and skips the syscall.
+				outputActive_ = true;
+				const int result = (!suspended_ && channel_ >= 0
+					? sceAudioOutputBlocking(channel_, PSP_AUDIO_VOLUME_MAX, output[bufferIndex]) : 0);
+				outputActive_ = false;
 				if (result < 0 && running_) {
 					++OutputErrors;
 					sceKernelDelayThread(1000);
@@ -590,6 +648,9 @@ namespace nCine
 		SceUID mutex_;
 		volatile bool running_;
 		volatile bool suspended_;
+		volatile bool outputActive_;
+		int suspendDepth_;
+		bool reopenChannelAfterResume_;
 		float gain_;
 		Vector3f listenerPosition_;
 		Voice voices_[MaxVoices];
@@ -827,29 +888,38 @@ namespace nCine
 	void AudioBufferPlayer::updateState() {}
 
 	// Music is host-baked 22.05 kHz IMA ADPCM; one block (~46 ms) is decoded and expanded to 44.1 kHz at a time.
+	AudioStream* AudioStream::pspStreamsHead_ = nullptr;
+
 	AudioStream::AudioStream()
 		: nextAvailableBufferIndex_(0), currentBufferId_(0), bytesPerSample_(0), numChannels_(0), frequency_(0),
 		  numSamples_(-1), duration_(0.0f), isLooping_(false), format_(0), pspDataOffset_(0), pspDataSize_(0),
 		  pspDataRemaining_(0), pspBlockAlign_(0), pspSamplesPerBlock_(0), pspSourceSamplesRemaining_(0),
-		  pspDecodedFrames_(0), pspDecodedCursor_(0), pspDecodeFailed_(false)
+		  pspDecodedFrames_(0), pspDecodedCursor_(0), pspResumeFileOffset_(0), pspDecodeFailed_(false),
+		  pspReopenPending_(false), pspNextStream_(nullptr)
 	{
+		registerPspStream();
 	}
 	AudioStream::AudioStream(StringView filename) : AudioStream() { loadFromFile(filename); }
-	AudioStream::~AudioStream() = default;
+	AudioStream::~AudioStream() { unregisterPspStream(); }
 	AudioStream::AudioStream(AudioStream&& other)
 		: buffersIds_(std::move(other.buffersIds_)), nextAvailableBufferIndex_(other.nextAvailableBufferIndex_),
 		  decodeRequest_(std::move(other.decodeRequest_)), currentBufferId_(other.currentBufferId_),
 		  bytesPerSample_(other.bytesPerSample_), numChannels_(other.numChannels_), frequency_(other.frequency_),
 		  numSamples_(other.numSamples_), duration_(other.duration_), isLooping_(other.isLooping_), format_(other.format_),
 		  audioReader_(std::move(other.audioReader_)), pspFile_(std::move(other.pspFile_)),
+		  pspFilename_(std::move(other.pspFilename_)),
 		  pspBlock_(std::move(other.pspBlock_)), pspDecoded_(std::move(other.pspDecoded_)),
 		  pspDataOffset_(other.pspDataOffset_), pspDataSize_(other.pspDataSize_),
 		  pspDataRemaining_(other.pspDataRemaining_), pspBlockAlign_(other.pspBlockAlign_),
 		  pspSamplesPerBlock_(other.pspSamplesPerBlock_),
 		  pspSourceSamplesRemaining_(other.pspSourceSamplesRemaining_),
 		  pspDecodedFrames_(other.pspDecodedFrames_), pspDecodedCursor_(other.pspDecodedCursor_),
-		  pspDecodeFailed_(other.pspDecodeFailed_)
+		  pspResumeFileOffset_(other.pspResumeFileOffset_), pspDecodeFailed_(other.pspDecodeFailed_),
+		  pspReopenPending_(other.pspReopenPending_), pspNextStream_(nullptr)
 	{
+		other.unregisterPspStream();
+		other.pspReopenPending_ = false;
+		registerPspStream();
 	}
 	AudioStream& AudioStream::operator=(AudioStream&& other)
 	{
@@ -868,6 +938,9 @@ namespace nCine
 	void AudioStream::setLooping(bool value) { isLooping_ = value; }
 	bool AudioStream::loadFromFile(StringView filename)
 	{
+		pspFile_.reset();
+		pspFilename_ = filename;
+		pspReopenPending_ = false;
 		pspFile_ = fs::Open(filename, FileAccess::Read, 16 * 1024);
 		if (pspFile_ == nullptr || !pspFile_->IsValid()) return false;
 		unsigned char riff[12];
@@ -924,9 +997,49 @@ namespace nCine
 	}
 	void AudioStream::createReader(IAudioLoader&) {}
 
+	void AudioStream::registerPspStream()
+	{
+		pspNextStream_ = pspStreamsHead_;
+		pspStreamsHead_ = this;
+	}
+
+	void AudioStream::unregisterPspStream()
+	{
+		AudioStream** link = &pspStreamsHead_;
+		while (*link != nullptr && *link != this) link = &(*link)->pspNextStream_;
+		if (*link == this) *link = pspNextStream_;
+		pspNextStream_ = nullptr;
+	}
+
+	void AudioStream::suspendPspStream()
+	{
+		if (pspReopenPending_ || pspFile_ == nullptr) return;
+		pspResumeFileOffset_ = pspFile_->GetPosition();
+		if (pspResumeFileOffset_ < 0) pspResumeFileOffset_ = pspDataOffset_;
+		pspFile_.reset();
+		pspReopenPending_ = !pspFilename_.empty();
+	}
+
+	bool AudioStream::resumePspStream()
+	{
+		if (!pspReopenPending_) return true;
+		auto reopened = fs::Open(pspFilename_, FileAccess::Read, 16 * 1024);
+		if (reopened == nullptr || !reopened->IsValid() ||
+			reopened->Seek(pspResumeFileOffset_, SeekOrigin::Begin) != pspResumeFileOffset_) return false;
+		pspFile_ = std::move(reopened);
+		pspReopenPending_ = false;
+		return true;
+	}
+
 	bool AudioStream::rewindPsp()
 	{
-		if (pspFile_ == nullptr || pspFile_->Seek(pspDataOffset_, SeekOrigin::Begin) < 0) return false;
+		if (pspReopenPending_) {
+			// stop() can legitimately run while a Sony utility (or a nested hardware suspend) has the backing
+			// file closed. Make the pending reopen target the beginning instead of resurrecting the old position.
+			pspResumeFileOffset_ = pspDataOffset_;
+		} else if (pspFile_ == nullptr || pspFile_->Seek(pspDataOffset_, SeekOrigin::Begin) < 0) {
+			return false;
+		}
 		pspDataRemaining_ = pspDataSize_;
 		pspSourceSamplesRemaining_ = numSamples_;
 		pspDecodedFrames_ = 0;

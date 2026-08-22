@@ -610,7 +610,9 @@ namespace Jazz2
 		if (_pspGodCheat) OnConsoleCommand("jjgod"_s);
 
 		SceCtrlData pad{};
-		if (!_pspMenuActive) sceCtrlReadBufferPositive(&pad, 1);
+		pad.Lx = 128;
+		pad.Ly = 128;
+		if (!_pspMenuActive && sceCtrlReadBufferPositive(&pad, 1) <= 0) pad.Buttons = 0;
 		auto& input = _playerInputs[0];
 		if (_pspMenuActive) {
 			input.PressedActions = 0;

@@ -16,6 +16,10 @@ namespace nCine
 	void PspGuSetSystemUtilityUpdate(void (*callback)());
 	// Requests restoration of GU state on the first game frame after a Sony utility closes.
 	void PspGuNotifySystemUtilityFinished();
+	// Quiesces the GE before the firmware powers the device down, then invalidates and restores all persistent
+	// GU state after wake. These are main-thread calls made only at a frame boundary.
+	void PspGuSuspend();
+	void PspGuResume();
 	std::size_t PspGuDisplayListBytes();
 	// Fence without presenting. Required before texture storage is modified or released.
 	void PspGuWaitForPreviousFrame();

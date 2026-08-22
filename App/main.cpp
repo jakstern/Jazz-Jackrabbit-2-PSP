@@ -121,6 +121,8 @@ namespace nCine
 {
 	void PspBootEngine(std::unique_ptr<IAppEventHandler> (*createAppEventHandler)());
 	void PspStepEngine();
+	void PspSuspendEngine();
+	void PspResumeEngine();
 	bool PspEngineWantsQuit();
 	void PspShutdownEngine();
 }
@@ -129,16 +131,47 @@ namespace
 {
 	static constexpr std::uint32_t MultiplayerProtocolVersion = 1;
 
-	volatile int g_running = 1;
+	std::atomic<bool> g_running{true};
+	std::atomic<bool> g_powerSuspendRequested{false};
+	std::atomic<bool> g_powerSuspendPrepared{false};
+	std::atomic<bool> g_powerResumeRequested{false};
 
+	int ExitCallback(int, int, void*)
+	{
+		g_running.store(false, std::memory_order_release);
+		return 0;
+	}
 
-
-	int ExitCallback(int, int, void*) { g_running = 0; return 0; }
+	int PowerCallback(int, int powerInfo, void*)
+	{
+		if ((powerInfo & (PSP_POWER_CB_POWER_SWITCH | PSP_POWER_CB_SUSPENDING)) != 0) {
+			// Power callbacks run on CallbackThread, while every engine object belongs to the main thread. Locking
+			// standby gives the frame loop time to drain GU/audio/I/O without racing it from this callback.
+			const bool firstRequest = !g_powerSuspendRequested.exchange(true, std::memory_order_acq_rel);
+			int powerLockResult = -1;
+			if (firstRequest) {
+				g_powerResumeRequested.store(false, std::memory_order_release);
+				powerLockResult = scePowerLock(0);
+			}
+			while (g_running.load(std::memory_order_acquire) &&
+				!g_powerSuspendPrepared.load(std::memory_order_acquire)) {
+				sceKernelDelayThread(1000);
+			}
+			if (firstRequest && powerLockResult >= 0) scePowerUnlock(0);
+		}
+		// Some real firmware revisions report RESUMING promptly but defer RESUME_COMPLETE until a later power
+		// event. Resource reopen has bounded retries, so either notification is a safe wake signal.
+		if ((powerInfo & (PSP_POWER_CB_RESUMING | PSP_POWER_CB_RESUME_COMPLETE)) != 0)
+			g_powerResumeRequested.store(true, std::memory_order_release);
+		return 0;
+	}
 
 	int CallbackThread(SceSize, void*)
 	{
-		int cb = sceKernelCreateCallback("ExitCallback", ExitCallback, nullptr);
-		sceKernelRegisterExitCallback(cb);
+		const int exitCallback = sceKernelCreateCallback("ExitCallback", ExitCallback, nullptr);
+		if (exitCallback >= 0) sceKernelRegisterExitCallback(exitCallback);
+		const int powerCallback = sceKernelCreateCallback("PowerCallback", PowerCallback, nullptr);
+		if (powerCallback >= 0) scePowerRegisterCallback(-1, powerCallback);
 		sceKernelSleepThreadCB();
 		return 0;
 	}
@@ -147,6 +180,25 @@ namespace
 	{
 		int th = sceKernelCreateThread("CallbackThread", CallbackThread, 0x11, 0xFA0, 0, nullptr);
 		if (th >= 0) sceKernelStartThread(th, 0, nullptr);
+	}
+
+	bool ServicePowerState()
+	{
+		if (!g_powerSuspendRequested.load(std::memory_order_acquire)) return true;
+		if (!g_powerSuspendPrepared.load(std::memory_order_acquire)) {
+			nCine::PspSuspendEngine();
+			g_powerSuspendPrepared.store(true, std::memory_order_release);
+		}
+		if (!g_powerResumeRequested.load(std::memory_order_acquire)) {
+			sceKernelDelayThread(1000);
+			return false;
+		}
+
+		nCine::PspResumeEngine();
+		g_powerResumeRequested.store(false, std::memory_order_release);
+		g_powerSuspendPrepared.store(false, std::memory_order_release);
+		g_powerSuspendRequested.store(false, std::memory_order_release);
+		return true;
 	}
 
 
@@ -169,6 +221,34 @@ namespace
 			g_savedataManager = nullptr;
 			DbgLog("stage: shutdown");
 			DbgStop();
+		}
+
+		void OnSuspend() override
+		{
+			DbgLog("stage: power suspend");
+			nCine::PspAssetPack::Get().Suspend();
+			DbgStop();
+		}
+
+		void OnResume() override
+		{
+			DbgStart();
+			bool packReady = false;
+			for (int attempt = 0; attempt < 50 && !packReady; ++attempt) {
+				packReady = nCine::PspAssetPack::Get().Resume();
+				if (!packReady) sceKernelDelayThread(10000);
+			}
+			DbgLog(packReady ? "stage: power resume" : "stage: power resume (texture pack unavailable)");
+
+			SceCtrlData pad{};
+			pad.Lx = 128;
+			pad.Ly = 128;
+			if (sceCtrlPeekBufferPositive(&pad, 1) <= 0) pad.Buttons = 0;
+			pauseButtonsLast_ = pad.Buttons;
+			if (levelHandler_ != nullptr) levelHandler_->SuppressInputUntilRelease();
+			if (menu_ != nullptr) menu_->LatchInput();
+			if (pauseMenu_ != nullptr) pauseMenu_->LatchInput();
+			if (preparationScreen_ != nullptr) preparationScreen_->LatchInput();
 		}
 
 		Multiplayer::ConnectionResult OnPeerConnected(const Multiplayer::Peer&, std::uint32_t) override
@@ -351,7 +431,10 @@ namespace
 			}
 			auto& audioDevice = nCine::theServiceLocator().GetAudioDevice();
 			// Stop the high-priority mixer before its menu players are destroyed under it.
-			audioDevice.suspendDevice();
+			if (!bakeAudioSuspended_) {
+				audioDevice.suspendDevice();
+				bakeAudioSuspended_ = true;
+			}
 			audioDevice.stopPlayers();
 			if (preparationScreen_ != nullptr) { preparationScreen_->setParent(nullptr); preparationScreen_ = nullptr; }
 			if (menu_ != nullptr) { menu_->setParent(nullptr); menu_ = nullptr; }
@@ -402,7 +485,10 @@ namespace
 			if (preparationScreen_ != nullptr) { preparationScreen_->setParent(nullptr); preparationScreen_ = nullptr; }
 			nCine::PspAssetPack::Get().Reset();
 			ContentResolver::Get().RemountPaks();
-			nCine::theServiceLocator().GetAudioDevice().resumeDevice();
+			if (bakeAudioSuspended_) {
+				nCine::theServiceLocator().GetAudioDevice().resumeDevice();
+				bakeAudioSuspended_ = false;
+			}
 			menu_ = std::make_unique<PspMenu>(&savedata_, adhoc_);
 			menu_->setParent(&nCine::theApplication().GetRootNode());
 			state_ = AppState::Menu;
@@ -869,8 +955,10 @@ namespace
 				levelHandler_->StartPspMusicAfterFirstPresent();
 				startMusicAfterPresent_ = false;
 			}
-			SceCtrlData pad;
-			sceCtrlPeekBufferPositive(&pad, 1);
+			SceCtrlData pad{};
+			pad.Lx = 128;
+			pad.Ly = 128;
+			if (sceCtrlPeekBufferPositive(&pad, 1) <= 0) pad.Buttons = pauseButtonsLast_;
 			const std::uint32_t pauseHit = pad.Buttons & ~pauseButtonsLast_;
 			pauseButtonsLast_ = pad.Buttons;
 			// Engine order is OnBeginFrame -> viewport update (player moves) -> OnPostUpdate -> Draw, and input
@@ -1722,6 +1810,7 @@ namespace
 		PspBakeStatus bakeStatus_{};
 		SceUID bakeThread_ = -1;
 		bool bakeRecreate_ = false;
+		bool bakeAudioSuspended_ = false;
 		bool profileBootLoadStarted_ = false;
 		char bakeSourcePath_[512] = "Source/";
 		char bakeCachePath_[512] = "Cache/";
@@ -1772,16 +1861,17 @@ std::unique_ptr<nCine::IAppEventHandler> CreateAppEventHandler()
 
 int main()
 {
-	SetupCallbacks();
 	EnsureEmbeddedPspContent();
 
 	nCine::PspBootEngine(&CreateAppEventHandler);
-	while (g_running && !nCine::PspEngineWantsQuit()) {
-		nCine::PspStepEngine();
+	// Register only after Boot: a callback cannot otherwise wait for a main-thread suspend boundary that does
+	// not exist yet while initialization is still doing synchronous file and GU work.
+	SetupCallbacks();
+	while (g_running.load(std::memory_order_acquire) && !nCine::PspEngineWantsQuit()) {
+		if (ServicePowerState()) nCine::PspStepEngine();
 	}
 	nCine::PspShutdownEngine();
 
 	sceKernelExitGame();
 	return 0;
 }
-

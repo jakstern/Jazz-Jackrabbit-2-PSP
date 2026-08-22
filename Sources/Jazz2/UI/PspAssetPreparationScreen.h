@@ -110,7 +110,7 @@ namespace Jazz2::UI
 		{
 			Jazz2::UI::Canvas::OnUpdate(timeMult);
 			SceCtrlData pad{};
-			sceCtrlPeekBufferPositive(&pad, 1);
+			if (sceCtrlPeekBufferPositive(&pad, 1) <= 0) pad.Buttons = _lastButtons;
 			const std::uint32_t hit = pad.Buttons & ~_lastButtons;
 			_lastButtons = pad.Buttons;
 			if (_unsupported) {
@@ -123,6 +123,12 @@ namespace Jazz2::UI
 
 		bool RetryRequested() const { return _retry; }
 		void ClearRetry() { _retry = false; }
+		void LatchInput()
+		{
+			SceCtrlData pad{};
+			if (sceCtrlPeekBufferPositive(&pad, 1) <= 0) pad.Buttons = 0;
+			_lastButtons = pad.Buttons;
+		}
 
 		// Replaces the progress UI when the bake cannot run on this hardware at all. Dismissable only if a
 		// usable cache already exists, i.e. if there is a menu to go back to.
