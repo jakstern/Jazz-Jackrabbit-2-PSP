@@ -50,6 +50,11 @@ namespace Jazz2::Actors::Solid
 			Vector2f Pos;
 			std::unique_ptr<RenderCommand> Command;
 		};
+
+		struct PlayerContact {
+			Player* Actor;
+			float FeetDistance;
+		};
 #endif
 
 		static constexpr float BaseY = -6.0f;
@@ -77,6 +82,7 @@ namespace Jazz2::Actors::Solid
 		bool _sagWasActive;
 
 		SmallVector<BridgePiece, 0> _pieces;
+		SmallVector<PlayerContact, 8> _previousPlayerContacts;
 
 		float GetSectionHeight(float x) const;
 		float GetDropAt(float widthCovered, float leftX, float leftHeight, float rightX, float rightHeight) const;

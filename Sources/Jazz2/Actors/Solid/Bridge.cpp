@@ -100,8 +100,21 @@ namespace Jazz2::Actors::Solid
 		auto players = _levelHandler->GetPlayers();
 		for (auto* player : players) {
 			auto diff = player->GetPos() - _pos;
+			float surfaceY = _pos.Y + BaseY + GetDropAt(diff.X, _leftX, _leftHeight, _rightX, _rightHeight);
+			float feetDistance = player->AABBInner.B - surfaceY;
+			bool crossedSurface = false;
+			for (const auto& contact : _previousPlayerContacts) {
+				if (contact.Actor == player) {
+					crossedSurface = (contact.FeetDistance <= 0.0f && feetDistance >= 0.0f);
+					break;
+				}
+			}
+
+			// A new rider must land feet-first from above. Proximity alone also catches jumps
+			// that turn downward below the bridge, snapping the player through its underside.
 			if (n < arraySize(foundPlayers) && diff.X >= -20.0f && diff.X <= _bridgeWidth + 20.0f &&
-				diff.Y > -27.0f && diff.Y < _heightFactor && player->GetSpeed().Y >= 0.0f) {
+				player->GetSpeed().Y >= 0.0f && (crossedSurface ||
+					(player->GetCarryingObject() == this && diff.Y > -27.0f && diff.Y < _heightFactor))) {
 				foundX[n] = diff.X;
 				foundPlayers[n] = player;
 				n++;
@@ -158,6 +171,15 @@ namespace Jazz2::Actors::Solid
 		} else {
 			_leftHeight = lerpByTime(_leftHeight, 0.0f, 0.1f, timeMult);
 			_rightHeight = lerpByTime(_rightHeight, 0.0f, 0.1f, timeMult);
+		}
+
+		// Sample after carrying and sag updates so the next frame compares against the
+		// surface the player actually saw, including bridges already bent by other players.
+		_previousPlayerContacts.clear();
+		for (auto* player : players) {
+			float x = player->GetPos().X - _pos.X;
+			float surfaceY = _pos.Y + BaseY + GetDropAt(x, _leftX, _leftHeight, _rightX, _rightHeight);
+			_previousPlayerContacts.push_back({ player, player->AABBInner.B - surfaceY });
 		}
 
 		// The server sees all players and computes the authoritative sag; broadcast it via the actor RPC so
